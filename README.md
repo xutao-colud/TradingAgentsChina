@@ -144,3 +144,4 @@ DeepSeek receives the deterministic report and a compact local-memory summary on
 The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis.
 
 For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle.
+# TradingAgentsChina
