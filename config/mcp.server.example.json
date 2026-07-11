@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "china-stock-market": {
+      "command": "python",
+      "args": ["-m", "app.mcp.stdio"],
+      "cwd": "C:/Users/WIN10/Documents/TradingAgentsChina"
+    }
+  }
+}

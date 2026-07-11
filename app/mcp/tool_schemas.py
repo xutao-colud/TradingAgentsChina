@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from typing import Any
+
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "get_realtime_quote",
+        "title": "A-share Real-time Quote",
+        "description": "Get real-time or latest available quote for an A-share symbol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Normalized symbol, e.g. 600519.SH"},
+                "source": {"type": "string", "description": "Optional provider name", "default": "eastmoney"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "get_daily_bars",
+        "title": "A-share Daily Bars",
+        "description": "Get daily OHLCV bars for an A-share symbol.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "adjust": {"type": "string", "enum": ["none", "qfq", "hfq"], "default": "qfq"},
+            },
+            "required": ["symbol", "start_date", "end_date"],
+        },
+    },
+    {
+        "name": "get_market_breadth",
+        "title": "A-share Market Breadth",
+        "description": "Get market temperature inputs including breadth, limit-ups, limit-downs, and hot-money cycle metrics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "trade_date": {"type": "string", "format": "date"},
+                "market": {"type": "string", "enum": ["all", "sh", "sz", "bj"], "default": "all"},
+            },
+            "required": ["trade_date"],
+        },
+    },
+    {
+        "name": "get_money_flow",
+        "title": "A-share Money Flow",
+        "description": "Get main-force, super-large-order, margin, and northbound flow signals.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "trade_date": {"type": "string", "format": "date"},
+            },
+            "required": ["symbol", "trade_date"],
+        },
+    },
+    {
+        "name": "search_announcements",
+        "title": "A-share Announcement Search",
+        "description": "Search official company announcements and exchange risk letters.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "keywords": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["symbol", "start_date", "end_date"],
+        },
+    },
+    {
+        "name": "save_analysis_event",
+        "title": "Save A-share Analysis Event",
+        "description": "Append an analysis report to local memory. This tool is append-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "analysis_date": {"type": "string", "format": "date"},
+                "user_query": {"type": "string"},
+                "report": {"type": "object"},
+            },
+            "required": ["symbol", "analysis_date", "report"],
+        },
+    },
+    {
+        "name": "record_feedback",
+        "title": "Record Trading Feedback",
+        "description": "Record user feedback or outcome after an analysis.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "feedback_type": {"type": "string", "enum": ["preference", "outcome", "correction", "rule"]},
+                "user_comment": {"type": "string"},
+                "analysis_report_id": {"type": "string"},
+                "outcome_return_pct": {"type": "number"},
+                "outcome_days": {"type": "integer"},
+                "learned_rule": {"type": "string"},
+            },
+            "required": ["symbol", "feedback_type", "user_comment"],
+        },
+    },
+]
+
+
+def list_tool_schemas() -> list[dict[str, Any]]:
+    return deepcopy(TOOLS)
+
+
+def find_tool_schema(name: str) -> dict[str, Any] | None:
+    for tool in TOOLS:
+        if tool["name"] == name:
+            return deepcopy(tool)
+    return None
+

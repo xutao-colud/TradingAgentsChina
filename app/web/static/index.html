@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>霜降 · A股研究工作台</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="kicker">TRADING AGENTS / CHINA</p>
+          <h1>霜降 <span>·</span> A股研究工作台</h1>
+        </div>
+        <div class="status"><i></i><span id="serverStatus">本地引擎连接中</span></div>
+      </header>
+
+      <section class="hero-grid">
+        <article class="command-card">
+          <div class="card-label">RESEARCH COMMAND</div>
+          <h2>今天，研究哪一只？</h2>
+          <form id="analysisForm">
+            <label>股票代码<input id="symbol" value="600519" maxlength="9" autocomplete="off"></label>
+            <label>分析日期<input id="analysisDate" type="date"></label>
+            <label class="wide">你的问题（会写入本地摘要）<textarea id="question" rows="3" placeholder="例如：这只股票是否符合我的趋势回踩打法？"></textarea></label>
+            <label class="toggle wide"><input id="modelExplain" type="checkbox"><span>使用当前配置模型解释报告与实时行情上下文</span></label>
+            <button id="analyzeButton" type="submit">开始研判 <b>↗</b></button>
+          </form>
+          <p id="formMessage" class="muted">默认使用离线样例数据；研究结论不构成投资建议。</p>
+        </article>
+
+        <article class="market-tape">
+          <div class="card-label">SYSTEM PRINCIPLE</div>
+          <p class="tape-title">FACTS → SKILLS → REVIEW</p>
+          <div class="tape-grid">
+            <div><strong>数据</strong><span>工具提供事实</span></div>
+            <div><strong>研判</strong><span>Skills 确定性计算</span></div>
+            <div><strong>记忆</strong><span>个人战法可迁移</span></div>
+          </div>
+          <div class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </article>
+      </section>
+
+      <section class="market-board">
+        <article class="watch-card">
+          <div class="section-heading"><span>00</span><h2>盘中自选</h2><button id="refreshMarket" type="button" class="quiet-button">刷新实时行情 ↻</button></div>
+          <form id="watchlistForm" class="inline-form">
+            <label>股票代码<input id="watchSymbol" placeholder="600519" maxlength="9"></label>
+            <label class="watch-note">观察备注<input id="watchNote" placeholder="例如：等待回踩确认"></label>
+            <button type="submit">加入自选</button>
+          </form>
+          <p id="marketMessage" class="muted">点击“刷新实时行情”后获取最新可用报价；非交易时段可能为最近收盘数据。</p>
+          <div id="watchlistRows" class="watchlist-rows"><div class="empty-state compact">尚未加入自选股。</div></div>
+        </article>
+
+        <article class="account-card">
+          <div class="section-heading"><span>账户</span><h2>本地账户快照</h2></div>
+          <div class="account-stats" id="accountStats"></div>
+          <form id="cashForm" class="account-form"><label>账户可用余额<input id="cashBalance" type="number" min="0" step="0.01" placeholder="0.00"></label><button type="submit">保存余额</button></form>
+          <form id="positionForm" class="position-form"><label>持仓代码<input id="positionSymbol" placeholder="600519"></label><label>数量<input id="positionQty" type="number" min="1" step="1" placeholder="100"></label><label>成本价<input id="positionCost" type="number" min="0" step="0.0001" placeholder="1500.00"></label><button type="submit">保存持仓</button></form>
+          <p class="muted">仅本地记录，不连接券商、不执行交易。实时价格仅用于研究与快照估算。</p>
+        </article>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="report-card">
+          <div class="section-heading"><span>01</span><h2>本次报告</h2><em id="reportDate">等待输入</em></div>
+          <div id="emptyReport" class="empty-state">输入股票代码，生成第一份可追溯的 A 股研究报告。</div>
+          <div id="reportContent" hidden>
+            <div class="report-top"><div><p class="eyebrow" id="reportSymbol"></p><h3 id="reportTitle"></h3><p id="realtimeReport" class="realtime-report"></p></div><div class="verdict" id="verdict"></div></div>
+            <div class="scores" id="scores"></div>
+            <div class="narrative"><h4>行动框架</h4><p id="actionPlan"></p><h4>关键风险</h4><ul id="risks"></ul></div>
+            <div class="skills-wrap"><h4>领域 Skills</h4><div id="skills"></div></div>
+            <div id="modelSection" hidden class="model-note"><h4>DeepSeek 解释</h4><p id="modelInterpretation"></p></div>
+          </div>
+        </article>
+
+        <aside class="side-stack">
+          <article class="model-card">
+            <div class="section-heading"><span>模型</span><h2>实时解释引擎</h2></div>
+            <form id="modelForm" class="model-form">
+              <label>服务商<select id="modelProvider"></select></label>
+              <label>模型名称<input id="modelName" placeholder="使用服务商默认模型"></label>
+              <label>API Key（仅当前服务会话）<input id="modelKey" type="password" minlength="8" maxlength="512" autocomplete="off" placeholder="不会写入个人档案"></label>
+              <button type="submit">配置当前模型</button><button id="clearModelKey" type="button" class="secondary-button">清除会话密钥</button>
+            </form>
+            <p id="modelStatus" class="muted">读取模型状态中…</p>
+          </article>
+
+          <article class="profile-card">
+            <div class="section-heading"><span>02</span><h2>你的打法</h2></div>
+            <label class="playbook-select">当前公开风格原型<select id="playbookSelect"></select></label>
+            <p id="playbookNote" class="muted"></p>
+            <div id="profileContent" class="profile-content"></div>
+            <form id="feedbackForm" class="feedback-form">
+              <label>补充习惯 / 战法<textarea id="feedback" rows="2" placeholder="例如：不做高位情绪接力"></textarea></label>
+              <button type="submit">写入个人档案</button>
+            </form>
+          </article>
+
+          <article class="memory-card">
+            <div class="section-heading"><span>03</span><h2>随身记忆</h2></div>
+            <p>一个 JSON 文件，换电脑后导入即可延续你的风格、战法、反馈与问答摘要。</p>
+            <div class="memory-actions"><button id="exportButton">导出档案 ↓</button><label class="import-button">导入档案 ↑<input id="importInput" type="file" accept="application/json"></label></div>
+            <p id="memoryMessage" class="muted"></p>
+          </article>
+
+          <article class="tools-card">
+            <div class="section-heading"><span>04</span><h2>已挂载工具</h2></div>
+            <ul id="toolList" class="tool-list"></ul>
+          </article>
+        </aside>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
