@@ -110,6 +110,7 @@ class SkillInsight:
     strategy: str
     evidence: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class AnalysisReport:
     evidence_sources: list[EvidenceSource]
     skill_insights: list[SkillInsight] = field(default_factory=list)
     active_playbook: str | None = None
+    user_question: str | None = None
     realtime_quote: dict[str, Any] | None = None
     model_interpretation: str | None = None
     disclaimer: str = "研究分析输出，不构成投资建议或自动交易指令。"

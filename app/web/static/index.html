@@ -23,11 +23,11 @@
           <form id="analysisForm">
             <label>股票代码<input id="symbol" value="600519" maxlength="9" autocomplete="off"></label>
             <label>分析日期<input id="analysisDate" type="date"></label>
-            <label class="wide">你的问题（会写入本地摘要）<textarea id="question" rows="3" placeholder="例如：这只股票是否符合我的趋势回踩打法？"></textarea></label>
+            <label class="wide">你的问题（进入委员会研讨并写入本地摘要）<textarea id="question" rows="3" placeholder="例如：这只股票是否符合我的趋势回踩打法？"></textarea></label>
             <label class="toggle wide"><input id="modelExplain" type="checkbox"><span>使用当前配置模型解释报告与实时行情上下文</span></label>
             <button id="analyzeButton" type="submit">开始研判 <b>↗</b></button>
           </form>
-          <p id="formMessage" class="muted">默认使用离线样例数据；研究结论不构成投资建议。</p>
+          <p id="formMessage" class="muted">行情与资金实时优先；财务、公告和市场宽度仍有样例兜底，研究结论不构成投资建议。</p>
         </article>
 
         <article class="market-tape">
@@ -59,8 +59,19 @@
           <div class="account-stats" id="accountStats"></div>
           <form id="cashForm" class="account-form"><label>账户可用余额<input id="cashBalance" type="number" min="0" step="0.01" placeholder="0.00"></label><button type="submit">保存余额</button></form>
           <form id="positionForm" class="position-form"><label>持仓代码<input id="positionSymbol" placeholder="600519"></label><label>数量<input id="positionQty" type="number" min="1" step="1" placeholder="100"></label><label>成本价<input id="positionCost" type="number" min="0" step="0.0001" placeholder="1500.00"></label><button type="submit">保存持仓</button></form>
+          <div id="positionRows" class="position-rows"><div class="empty-state compact">尚未记录持仓。</div></div>
           <p class="muted">仅本地记录，不连接券商、不执行交易。实时价格仅用于研究与快照估算。</p>
         </article>
+      </section>
+
+      <section class="morning-radar-card">
+        <div class="section-heading"><span>短线</span><h2>盘中资金雷达</h2><button id="refreshMorningRadar" type="button" class="quiet-button">刷新实时资金 ↻</button><em id="morningRadarStatus">等待刷新</em></div>
+        <p id="morningRadarMessage" class="muted">用于观察今天大资金更偏向哪些板块、哪些方向流出、哪些个股出现急拉。仅展示实时源或最近可用交易数据，不再用样例盘面兜底。</p>
+        <div class="radar-grid">
+          <div><h4>主力流入板块</h4><div id="sectorInflow" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
+          <div><h4>主力流出板块</h4><div id="sectorOutflow" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
+          <div><h4>极速拉升个股</h4><div id="fastMovers" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
+        </div>
       </section>
 
       <section class="dashboard-grid">
@@ -71,6 +82,7 @@
             <div class="report-top"><div><p class="eyebrow" id="reportSymbol"></p><h3 id="reportTitle"></h3><p id="realtimeReport" class="realtime-report"></p></div><div class="verdict" id="verdict"></div></div>
             <div class="scores" id="scores"></div>
             <div class="narrative"><h4>行动框架</h4><p id="actionPlan"></p><h4>关键风险</h4><ul id="risks"></ul></div>
+            <button id="committeeButton" type="button" class="court-button" hidden>查看投资流派法庭</button>
             <div class="skills-wrap"><h4>领域 Skills</h4><div id="skills"></div></div>
             <div id="modelSection" hidden class="model-note"><h4>DeepSeek 解释</h4><p id="modelInterpretation"></p></div>
           </div>
@@ -113,6 +125,13 @@
         </aside>
       </section>
     </main>
+    <div id="committeeModal" class="modal-backdrop" hidden>
+      <section class="committee-modal" role="dialog" aria-modal="true" aria-labelledby="committeeTitle">
+        <div class="section-heading"><span>COURT</span><h2 id="committeeTitle">投资流派法庭</h2><button id="closeCommittee" type="button" class="quiet-button">关闭</button></div>
+        <div id="committeeJudge" class="committee-judge"></div>
+        <div id="committeeFactions" class="committee-factions"></div>
+      </section>
+    </div>
     <script src="/app.js"></script>
   </body>
 </html>

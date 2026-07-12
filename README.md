@@ -9,7 +9,8 @@ This first version is intentionally small: it runs offline with a sample data pr
 - Normalizes A-share symbols such as `600519` to `600519.SH`
 - Collects daily price, basic fundamentals, announcements, money flow, market context, and themes from a provider interface
 - Runs deterministic agents for market cycle, fundamentals, technical trend, capital flow, announcements, themes, bull case, bear case, portfolio committee, and risk review
-- Adds A-share domain skills for market temperature, sentiment cycle, money-making effect, theme lifecycle, main-force behavior, announcement impact, risk scanning, and composite scoring
+- Adds A-share domain skills for market temperature, sentiment cycle, money-making effect, theme lifecycle, main-force behavior, announcement impact, evidence-chain quality, risk scanning, and composite scoring
+- Compares multiple A-share investment schools through an investment-faction committee and highlights the currently most persuasive research route
 - Applies China-specific trading rules such as ST flags, board daily limit ranges, liquidity checks, and suspend checks
 - Outputs a traceable research report instead of direct automated trading orders
 
@@ -44,6 +45,10 @@ python -m unittest discover -s tests
 The default provider is `SampleMarketDataProvider`, so the pipeline is reliable without network access. Real providers should implement `MarketDataProvider` in `app/data/providers/base.py` and can be swapped into `build_default_workflow()`.
 
 The system is research-only. It should not be used as financial advice or automated trading infrastructure.
+
+## Product Guardrails
+
+Codex and contributors should follow the project-level rules in [AGENTS.md](AGENTS.md): evidence first, memory first, user profile first, strategy first, and evolution first. The product direction is summarized in [A股 TradingOS 产品原则](docs/v3/tradingos-product-principles.md).
 
 ## v2 Direction
 
@@ -91,7 +96,7 @@ Run the first dashboard version:
 python -m app.web.server --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. The page supports analysis, personal-style feedback, portable memory import/export, report rendering, and discovery of mounted MCP tools. It is a local-only app; the initial data source remains `SampleMarketDataProvider`.
+Open `http://127.0.0.1:8000`. The page supports analysis, personal-style feedback, portable memory import/export, report rendering, and discovery of mounted MCP tools. It is a local-only app; the web console uses `EastmoneyRealtimeMarketDataProvider` for quote, daily K-line, profile tags, and money-flow data, then falls back to `SampleMarketDataProvider` for fundamentals, announcements, and broad market context until production sources are wired in.
 
 ### Watchlist, account snapshot, and real-time quotes
 
@@ -99,10 +104,14 @@ The web console also includes a local-only intraday board:
 
 - Add/remove a watchlist symbol and an observation note.
 - Save available cash, position quantity, and cost price locally.
-- Click **刷新实时行情** to query the fixed public quote source and calculate current market value, unrealized P/L, and daily P/L.
+- Click **刷新实时行情** to query the fixed public quote source and calculate current market value, unrealized P/L, daily P/L, sector tags, and order-size money flow.
 - Read the displayed research prompt as a risk/verification reminder, not an order instruction.
 
 Watchlist and portfolio data are included in `trading-agents-memory.json` exports. This file may contain sensitive account information, so store and transfer it securely. The quote response displays its source, date/time, and availability status; it can be unavailable or reflect the latest close outside market hours.
+
+### Morning money radar
+
+The dashboard includes a short-line `早盘资金雷达` panel. It ranks sector main-force inflow, sector outflow, and fast-moving stocks through `MorningMoneyRadarClient`, with an offline sample fallback when the public provider is unavailable. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
 
 ## Switchable A-share playbooks
 
@@ -115,6 +124,8 @@ python -m app.cli 600519 --date 2026-07-10
 ```
 
 The selected playbook is portable with your Memory bundle. Each report gives a fit result, hard disqualifiers, and an optimization note; a playbook cannot override risk gates. Read the full rules and required backtest gate in [the playbook library](docs/v2/playbook-library.md).
+
+Each report also runs an `投资流派委员会` Skill. It compares aggressive hot-money, trend-capacity, institutional growth, value/dividend, policy-cycle, reversal, and defensive routes under the same evidence set, then outputs the current win-rate proxy leader. This is a route-selection signal for research and review, not a promise of future returns. See [the committee design](docs/v3/investment-faction-committee.md).
 
 ## SaaS evolution reserve
 
@@ -137,11 +148,11 @@ $env:DEEPSEEK_API_KEY = "your-key"
 python -m app.cli 600519 --date 2026-07-10 --deepseek-explain
 ```
 
-DeepSeek receives the deterministic report and a compact local-memory summary only to explain evidence, counterexamples, and your strategy fit. It cannot alter the scores, risk gates, or generate automated orders.
+DeepSeek receives the deterministic report and a compact local-memory summary only to explain evidence, counterexamples, and your strategy fit. It now uses a reverse-audit prompt contract: the model must challenge the current conclusion, list invalidation conditions, and produce strengthen/wait/fail scenarios before giving a narrative. It cannot alter the scores, risk gates, or generate automated orders.
 
 ## Multi-model live explanation
 
 The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis.
 
-For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle.
+For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle, and [the flexibility audit](docs/v3/flexibility-audit.md) for hard-coded areas that should become versioned configuration.
 # TradingAgentsChina

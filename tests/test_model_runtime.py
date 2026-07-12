@@ -24,6 +24,8 @@ class ModelRuntimeTest(unittest.TestCase):
             def fake_post(url, headers, payload):
                 self.assertEqual(url, "https://open.bigmodel.cn/api/paas/v4/chat/completions")
                 self.assertEqual(payload["model"], "glm-5.1")
+                self.assertIn("反推验证", payload["messages"][0]["content"])
+                self.assertIn("反推验证任务", payload["messages"][1]["content"])
                 return {"choices": [{"message": {"content": "GLM 解释。"}}]}
 
             runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import datetime
 
 from app.memory.local_store import LocalMemoryStore
+from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
 from app.web.server import ResearchWebApp
 
@@ -21,6 +24,9 @@ class ResearchWebAppTest(unittest.TestCase):
                 }
             )
             self.assertEqual(result["symbol"], "600519.SH")
+            self.assertEqual(result["user_question"], "是否符合我的趋势回踩打法？")
+            committee = next(item for item in result["skill_insights"] if item["category"] == "committee")
+            self.assertEqual(committee["details"]["judge"]["discussion_topic"], "是否符合我的趋势回踩打法？")
             self.assertIn("memory_event_id", result)
             context = app.memory_store.build_context("600519.SH")
             self.assertEqual(context["recent_same_symbol_interactions"][0]["question"], "是否符合我的趋势回踩打法？")
@@ -54,6 +60,48 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(market["watchlist"][0]["quote"]["price"], 1515.0)
             self.assertEqual(market["portfolio"]["daily_pnl"], 150.0)
             self.assertEqual(market["portfolio"]["cash_balance"], 5000.0)
+            app.remove_position({"symbol": "600519"})
+            self.assertEqual(app.portfolio()["position_count"], 0)
+
+    def test_dashboard_watchlist_returns_sector_and_money_flow_snapshot(self) -> None:
+        quote_payload = '{"data":{"f43":759,"f44":834,"f45":759,"f46":816,"f47":38046199,"f48":30277260673.71,"f57":"000725","f58":"京东方Ａ","f60":815,"f116":281166450005.76,"f117":268436547948.03,"f127":"光学光电子","f128":"北京板块","f129":"物联网,OLED,人工智能","f168":1076,"f170":-687}}'
+        flow_payload = '{"data":{"klines":["2026-07-10,-5088655104.0,4058282752.0,1030372352.0,-1231041536.0,-3857613568.0,-16.81,13.40,3.40,-4.07,-12.74,7.59,-6.87"]}}'
+        responses = [quote_payload, flow_payload]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                stock_snapshot_client=EastmoneyStockSnapshotClient(fetch_text=lambda url: responses.pop(0), now=lambda: datetime(2026, 7, 13, 10, 0, 0)),
+            )
+            app.add_watchlist({"symbol": "000725", "note": "面板方向"})
+            market = app.refresh_market()
+            snapshot = market["watchlist"][0]["snapshot"]
+
+            self.assertEqual(snapshot["name"], "京东方A")
+            self.assertEqual(snapshot["industry"], "光学光电子")
+            self.assertEqual(snapshot["market_board"], "深市主板")
+            self.assertIn("OLED", snapshot["concepts"])
+            self.assertEqual(snapshot["money_flow"]["main_net_inflow"], -5088655104.0)
+            self.assertEqual(snapshot["money_flow"]["visible_large_net_inflow"], -5088655104.0)
+            self.assertEqual(snapshot["money_flow"]["hidden_follow_net_inflow"], 5088655104.0)
+            self.assertEqual(market["source"], "eastmoney_push2")
+
+    def test_dashboard_refresh_falls_back_to_sina_price_when_snapshot_is_unavailable(self) -> None:
+        response = 'var hq_str_sz000725="京东方A,7.20,7.10,7.25,0,0,0,0,100,725000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-13,10:15:00";'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                quote_client=SinaRealtimeQuoteClient(fetch_text=lambda url: response),
+                stock_snapshot_client=EastmoneyStockSnapshotClient(fetch_text=lambda url: "not-json", now=lambda: datetime(2026, 7, 13, 10, 0, 0)),
+            )
+            app.add_watchlist({"symbol": "000725", "note": "验证价格兜底"})
+            market = app.refresh_market()
+
+            self.assertEqual(market["source"], "eastmoney_push2+sina_fallback")
+            self.assertEqual(market["watchlist"][0]["quote"]["source"], "sina")
+            self.assertEqual(market["watchlist"][0]["quote"]["price"], 7.25)
+            self.assertEqual(market["watchlist"][0]["snapshot"]["data_status"], "unavailable")
 
     def test_dashboard_model_configuration_never_returns_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -70,3 +118,23 @@ class ResearchWebAppTest(unittest.TestCase):
             result = app.analyze({"symbol": "600519", "analysis_date": "2026-07-10", "include_realtime": True})
             self.assertEqual(result["realtime_quote"]["source"], "sina")
             self.assertEqual(result["realtime_quote"]["price"], 1515.0)
+
+    def test_dashboard_morning_radar_returns_shortline_lists(self) -> None:
+        responses = [
+            '{"data":{"diff":[{"f12":"BK1030","f14":"半导体","f3":2.1,"f62":1860000000,"f66":620000000,"f184":6.8}]}}',
+            '{"data":{"diff":[{"f12":"BK0475","f14":"银行","f3":-0.7,"f62":-1350000000,"f66":-320000000,"f184":-4.3}]}}',
+            '{"data":{"diff":[{"f12":"000725","f14":"京东方A","f2":4.68,"f3":3.1,"f6":3400000000,"f22":1.2,"f62":260000000,"f184":4.8}]}}',
+        ]
+
+        def fetch_text(url: str) -> str:
+            return responses.pop(0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                morning_radar_client=MorningMoneyRadarClient(fetch_text=fetch_text, now=lambda: datetime(2026, 7, 13, 9, 45, 0)),
+            )
+            radar = app.morning_radar({"limit": 3})
+            self.assertEqual(radar["data_status"], "real_time")
+            self.assertEqual(radar["top_inflow_sectors"][0]["name"], "半导体")
+            self.assertEqual(radar["fast_movers"][0]["symbol"], "000725.SZ")

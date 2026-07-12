@@ -8,12 +8,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from app.data.providers.eastmoney_provider import EastmoneyRealtimeMarketDataProvider
 from app.graph.workflow import AShareResearchWorkflow, build_default_workflow
 from app.llm.runtime import ModelRuntime
 from app.mcp.server import McpToolServer
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
+from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.playbooks.catalog import get_playbook, list_playbooks
 from app.portfolio.snapshot import build_portfolio_snapshot, quote_advice
 
@@ -29,12 +32,16 @@ class ResearchWebApp:
         memory_store: LocalMemoryStore,
         workflow: AShareResearchWorkflow | None = None,
         quote_client: SinaRealtimeQuoteClient | None = None,
+        morning_radar_client: MorningMoneyRadarClient | None = None,
+        stock_snapshot_client: EastmoneyStockSnapshotClient | None = None,
         model_runtime: ModelRuntime | None = None,
     ) -> None:
         self.memory_store = memory_store
         self.workflow = workflow or build_default_workflow()
         self.mcp_server = McpToolServer(provider=self.workflow.provider, memory_store=memory_store)
         self.quote_client = quote_client or SinaRealtimeQuoteClient()
+        self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient()
+        self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
         self.model_runtime = model_runtime or ModelRuntime(memory_store.root / "model_settings.json")
 
     def health(self) -> dict[str, Any]:
@@ -103,6 +110,12 @@ class ResearchWebApp:
             raise ValueError("symbol is required")
         return self.memory_store.upsert_position(symbol, float(payload.get("quantity", 0)), float(payload.get("cost_price", -1)))
 
+    def remove_position(self, payload: dict[str, Any]) -> dict[str, Any]:
+        symbol = payload.get("symbol")
+        if not isinstance(symbol, str) or not symbol.strip():
+            raise ValueError("symbol is required")
+        return self.memory_store.remove_position(symbol)
+
     def portfolio(self) -> dict[str, Any]:
         return build_portfolio_snapshot(self.memory_store.load_portfolio(), {})
 
@@ -110,21 +123,41 @@ class ResearchWebApp:
         watchlist = self.memory_store.load_watchlist()
         portfolio = self.memory_store.load_portfolio()
         symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
-        quotes = self.quote_client.fetch_quotes(list(dict.fromkeys(symbols)))
+        unique_symbols = list(dict.fromkeys(symbols))
+        snapshots = self.stock_snapshot_client.fetch_snapshots(unique_symbols) if self.stock_snapshot_client else {}
+        quotes = {
+            symbol: snapshot.to_quote()
+            for symbol, snapshot in snapshots.items()
+            if snapshot.data_status != "unavailable" and snapshot.price is not None
+        }
+        missing_quote_symbols = [symbol for symbol in unique_symbols if symbol not in quotes]
+        if missing_quote_symbols:
+            quotes.update(self.quote_client.fetch_quotes(missing_quote_symbols))
         watch_rows = [
             {
                 **item,
                 "quote": quotes[item["symbol"]].to_dict(),
+                "snapshot": snapshots[item["symbol"]].to_dict() if item["symbol"] in snapshots else None,
                 "advice": quote_advice(quotes[item["symbol"]]),
             }
             for item in watchlist
             if item["symbol"] in quotes
         ]
+        source = "eastmoney_push2"
+        if missing_quote_symbols and snapshots:
+            source = "eastmoney_push2+sina_fallback"
+        elif not snapshots:
+            source = "sina"
         return {
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
-            "source": "sina",
+            "source": source,
         }
+
+    def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        limit = _optional_int(payload.get("limit")) or 6
+        return self.morning_radar_client.fetch_snapshot(limit=limit).to_dict()
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
         symbol = payload.get("symbol")
@@ -134,12 +167,24 @@ class ResearchWebApp:
         if not isinstance(analysis_date, str) or not analysis_date:
             raise ValueError("analysis_date is required")
 
+        question = str(payload.get("question") or f"分析 {symbol}（{analysis_date}）")
         context = self.memory_store.build_context(symbol)
-        report = self.workflow.run(symbol, analysis_date, trading_profile=self.memory_store.load_profile())
+        report = self.workflow.run(
+            symbol,
+            analysis_date,
+            trading_profile=self.memory_store.load_profile(),
+            user_question=question,
+        )
         model_name = "deterministic-mvp"
         if payload.get("include_realtime") is True:
             try:
-                quote = self.quote_client.fetch_quotes([symbol]).get(report.symbol)
+                if self.stock_snapshot_client:
+                    snapshot = self.stock_snapshot_client.fetch_snapshot(report.symbol)
+                    quote = snapshot.to_quote() if snapshot.data_status != "unavailable" and snapshot.price is not None else None
+                    if quote is None:
+                        quote = self.quote_client.fetch_quotes([report.symbol]).get(report.symbol)
+                else:
+                    quote = self.quote_client.fetch_quotes([symbol]).get(report.symbol)
                 if quote:
                     report = replace(report, realtime_quote=quote.to_dict())
                     context["realtime_quote"] = quote.to_dict()
@@ -151,7 +196,6 @@ class ResearchWebApp:
             status = self.model_runtime.status()
             model_name = f"{status['active_provider']}:{status['active_model']}"
 
-        question = str(payload.get("question") or f"分析 {symbol}（{analysis_date}）")
         event = self.memory_store.save_analysis(report, user_query=question, model_name=model_name)
         interaction = self.memory_store.save_interaction_summary(report, question, event.id)
         result = report.to_dict()
@@ -234,8 +278,12 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.OK, self.app.update_cash_balance(payload))
             elif self.path == "/api/portfolio/position":
                 self._write_json(HTTPStatus.OK, self.app.upsert_position(payload))
+            elif self.path == "/api/portfolio/position/remove":
+                self._write_json(HTTPStatus.OK, self.app.remove_position(payload))
             elif self.path == "/api/market/refresh":
                 self._write_json(HTTPStatus.OK, self.app.refresh_market())
+            elif self.path == "/api/morning/radar":
+                self._write_json(HTTPStatus.OK, self.app.morning_radar(payload))
             elif self.path == "/api/models/configure":
                 if not self.allow_secret_configuration:
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
@@ -315,7 +363,13 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
 
 
 def create_server(host: str = "127.0.0.1", port: int = 8000, memory_dir: str = "data/memory") -> ThreadingHTTPServer:
-    TradingDeskHandler.app = ResearchWebApp(LocalMemoryStore(memory_dir))
+    snapshot_client = EastmoneyStockSnapshotClient()
+    realtime_provider = EastmoneyRealtimeMarketDataProvider(snapshot_client=snapshot_client)
+    TradingDeskHandler.app = ResearchWebApp(
+        LocalMemoryStore(memory_dir),
+        workflow=AShareResearchWorkflow(realtime_provider),
+        stock_snapshot_client=snapshot_client,
+    )
     TradingDeskHandler.allow_secret_configuration = host in {"127.0.0.1", "localhost", "::1"}
     return ThreadingHTTPServer((host, port), TradingDeskHandler)
 

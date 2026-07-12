@@ -19,10 +19,20 @@ class WorkflowTest(unittest.TestCase):
         self.assertGreater(len(report.evidence_sources), 3)
         self.assertIn(report.conclusion, {"强烈关注", "谨慎关注", "中性观察", "风险较高", "暂不参与"})
 
+    def test_sample_provider_resolves_known_a_share_names(self) -> None:
+        report = build_default_workflow().run("000725.SZ", "2026-07-10")
+        self.assertEqual(report.symbol, "000725.SZ")
+        self.assertEqual(report.name, "京东方A")
+        theme = next(item for item in report.agent_findings if item.agent == "题材热点 Agent")
+        self.assertFalse(any("消费复苏" in item and "匹配主题" in item for item in theme.evidence))
+        evidence_quality = next(item for item in report.skill_insights if item.skill == "证据链完整性")
+        self.assertEqual(evidence_quality.score, 100)
+
     def test_report_is_json_serializable(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_default_workflow().run("600519", "2026-07-10", user_question="是否适合我的趋势回踩打法？")
         encoded = json.dumps(report.to_dict(), ensure_ascii=False)
         self.assertIn("贵州茅台", encoded)
+        self.assertIn("是否适合我的趋势回踩打法？", encoded)
         self.assertIn("agent_findings", encoded)
         self.assertIn("skill_insights", encoded)
         self.assertIn("情绪周期识别", encoded)

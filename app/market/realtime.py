@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Callable
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -42,8 +43,9 @@ class SinaRealtimeQuoteClient:
     the model layer.
     """
 
-    def __init__(self, fetch_text: FetchText | None = None) -> None:
+    def __init__(self, fetch_text: FetchText | None = None, now: Callable[[], datetime] | None = None) -> None:
         self._fetch_text = fetch_text or _fetch_text
+        self._now = now or datetime.now
 
     def fetch_quotes(self, symbols: list[str]) -> dict[str, RealtimeQuote]:
         normalized = [normalize_symbol(symbol) for symbol in symbols]
@@ -53,7 +55,7 @@ class SinaRealtimeQuoteClient:
         url = SINA_QUOTE_URL + ",".join(identifiers.values())
         try:
             raw = self._fetch_text(url)
-            parsed = _parse_response(raw, identifiers)
+            parsed = _parse_response(raw, identifiers, self._now())
         except (URLError, OSError, ValueError) as exc:
             return {symbol: _unavailable_quote(symbol, str(exc)) for symbol in normalized}
 
@@ -78,7 +80,7 @@ def _to_sina_identifier(symbol: str) -> str:
     return identifier
 
 
-def _parse_response(raw: str, identifiers: dict[str, str]) -> dict[str, RealtimeQuote]:
+def _parse_response(raw: str, identifiers: dict[str, str], now: datetime) -> dict[str, RealtimeQuote]:
     by_identifier = {identifier: symbol for symbol, identifier in identifiers.items()}
     quotes: dict[str, RealtimeQuote] = {}
     for identifier, payload in _LINE_PATTERN.findall(raw):
@@ -93,6 +95,7 @@ def _parse_response(raw: str, identifiers: dict[str, str]) -> dict[str, Realtime
         change_pct = None
         if price is not None and previous_close not in (None, 0):
             change_pct = round((price / previous_close - 1) * 100, 2)
+        trade_date = fields[30] or None
         quotes[symbol] = RealtimeQuote(
             symbol=symbol,
             name=fields[0] or None,
@@ -101,8 +104,9 @@ def _parse_response(raw: str, identifiers: dict[str, str]) -> dict[str, Realtime
             change_pct=change_pct,
             volume=_as_float(fields[8]),
             amount=_as_float(fields[9]),
-            trade_date=fields[30] or None,
+            trade_date=trade_date,
             trade_time=fields[31] or None,
+            data_status=_data_status(now, trade_date),
         )
     return quotes
 
@@ -128,6 +132,15 @@ def _unavailable_quote(symbol: str, error: str) -> RealtimeQuote:
         data_status="unavailable",
         error=error[:200],
     )
+
+
+def _data_status(now: datetime, trade_date: str | None) -> str:
+    if trade_date != now.date().isoformat() or now.isoweekday() > 5:
+        return "latest_available"
+    hhmm = now.hour * 100 + now.minute
+    if 930 <= hhmm <= 1130 or 1300 <= hhmm <= 1500:
+        return "real_time"
+    return "latest_available"
 
 
 def _fetch_text(url: str) -> str:

@@ -3,6 +3,7 @@ import unittest
 from app.data.providers.sample_provider import SampleMarketDataProvider
 from app.rules.trading_rules import normalize_symbol
 from app.skills.market_temperature import assess_market_temperature
+from app.skills.risk_scanner import scan_a_share_risks
 from app.skills.sentiment_cycle import identify_sentiment_cycle
 from app.skills.theme_lifecycle import analyze_theme_lifecycle
 
@@ -34,7 +35,17 @@ class DomainSkillsTest(unittest.TestCase):
         self.assertGreaterEqual(insight.score, 50)
         self.assertTrue(any("消费复苏" in item for item in insight.evidence))
 
+    def test_risk_scanner_explains_grade_and_check_principles(self) -> None:
+        fundamentals = self.provider.get_fundamentals("000725.SZ")
+        insight = scan_a_share_risks(self.provider.get_stock_profile("000725.SZ"), fundamentals, [])
+
+        self.assertEqual(insight.skill, "A股风险扫描器")
+        self.assertEqual(insight.details["mode"], "risk_scan")
+        self.assertIn("grade_explanation", insight.details)
+        self.assertGreaterEqual(len(insight.details["grade_guide"]), 4)
+        self.assertTrue(any(item["name"] == "现金流质量" for item in insight.details["checks"]))
+        self.assertTrue(insight.details["next_checks"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

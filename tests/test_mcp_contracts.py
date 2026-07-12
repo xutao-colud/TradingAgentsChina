@@ -10,6 +10,7 @@ class McpContractsTest(unittest.TestCase):
     def test_core_tool_schemas_are_available(self) -> None:
         names = {tool["name"] for tool in list_tool_schemas()}
         self.assertIn("get_realtime_quote", names)
+        self.assertIn("get_morning_money_radar", names)
         self.assertIn("get_market_breadth", names)
         self.assertIn("save_analysis_event", names)
         self.assertIn("record_feedback", names)
@@ -36,4 +37,3 @@ class McpContractsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -18,6 +18,8 @@ from app.playbooks.evaluator import assess_active_playbook
 from app.rules.trading_rules import invalid_conditions, normalize_symbol
 from app.schemas.report import AnalysisReport
 from app.skills.announcement_impact import analyze_announcement_impact
+from app.skills.evidence_chain import assess_evidence_chain_quality
+from app.skills.investment_committee import assess_investment_faction_committee
 from app.skills.main_force_behavior import identify_main_force_behavior
 from app.skills.market_temperature import assess_market_temperature
 from app.skills.money_making_effect import assess_money_making_effect
@@ -37,12 +39,14 @@ class AShareResearchWorkflow:
         symbol: str,
         analysis_date: str,
         trading_profile: TradingProfile | None = None,
+        user_question: str | None = None,
     ) -> AnalysisReport:
         normalized_symbol = normalize_symbol(symbol)
         state = ResearchState(
             symbol=normalized_symbol,
             analysis_date=analysis_date,
             trading_profile=trading_profile,
+            user_question=user_question,
         )
         self._collect_data(state)
         self._run_agents(state)
@@ -82,6 +86,7 @@ class AShareResearchWorkflow:
             identify_main_force_behavior(state.prices, state.money_flow),
             analyze_announcement_impact(state.announcements),
             scan_a_share_risks(state.profile, state.fundamentals, state.invalid_conditions),
+            assess_evidence_chain_quality(state.findings, state.evidence_sources),
         ]
         composite = score_stock_composite(state.findings, base_insights)
         profile_alignment = assess_profile_alignment(state.trading_profile, state.findings, base_insights + [composite])
@@ -91,6 +96,14 @@ class AShareResearchWorkflow:
         playbook_assessment = assess_active_playbook(state.trading_profile, state.findings, state.skill_insights)
         if playbook_assessment:
             state.skill_insights.append(playbook_assessment)
+        state.skill_insights.append(
+            assess_investment_faction_committee(
+                state.findings,
+                state.skill_insights,
+                state.invalid_conditions,
+                user_question=state.user_question,
+            )
+        )
 
     def _build_report(self, state: ResearchState) -> AnalysisReport:
         if not state.profile or not state.market_context:
@@ -120,6 +133,7 @@ class AShareResearchWorkflow:
             evidence_sources=state.evidence_sources,
             skill_insights=state.skill_insights,
             active_playbook=state.trading_profile.active_playbook if state.trading_profile else None,
+            user_question=state.user_question,
         )
 
 

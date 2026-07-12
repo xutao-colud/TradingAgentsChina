@@ -73,7 +73,8 @@ def main() -> None:
         return
     workflow = build_default_workflow()
     memory_context = store.build_context(args.symbol)
-    report = workflow.run(args.symbol, args.date, trading_profile=store.load_profile())
+    default_question = f"分析 {args.symbol}（{args.date}）"
+    report = workflow.run(args.symbol, args.date, trading_profile=store.load_profile(), user_question=default_question)
     model_name = "deterministic-mvp"
     if args.deepseek_explain:
         config = DeepSeekConfig.from_env()
@@ -92,7 +93,7 @@ def main() -> None:
         memory_event_id = event.id
         store.save_interaction_summary(
             report,
-            question=f"分析 {args.symbol}（{args.date}）",
+            question=default_question,
             analysis_event_id=event.id,
         )
     if args.json:

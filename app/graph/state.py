@@ -20,6 +20,7 @@ from app.memory.models import TradingProfile
 class ResearchState:
     symbol: str
     analysis_date: str
+    user_question: str | None = None
     profile: StockProfile | None = None
     prices: list[DailyPrice] = field(default_factory=list)
     fundamentals: FundamentalSnapshot | None = None

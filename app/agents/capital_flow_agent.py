@@ -25,7 +25,6 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot) -> AgentFinding:
             f"大宗交易：{flow.block_trade_signal}",
         ],
         risks=["资金流为短期指标，连续性比单日方向更重要。"],
-        counterpoints=["主力资金口径来自样例数据，真实环境需校验供应商算法。"],
+        counterpoints=["主力资金口径存在供应商算法差异，真实环境需交叉校验。"],
         source_ids=["flow-001"],
     )
-

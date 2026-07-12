@@ -6,6 +6,7 @@ from typing import Any
 
 from app.data.providers.base import MarketDataProvider
 from app.data.providers.sample_provider import SampleMarketDataProvider
+from app.market.morning_radar import MorningMoneyRadarClient
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
 from app.mcp.tool_schemas import find_tool_schema, list_tool_schemas
@@ -121,6 +122,10 @@ def build_builtin_registry(provider: MarketDataProvider, memory_store: LocalMemo
             payload.update({"symbol": symbol, "trade_date": trade_date, "source": type(provider).__name__})
             return payload
 
+    def get_morning_money_radar(arguments: dict[str, Any]) -> dict[str, Any]:
+            limit = _optional_int(arguments.get("limit")) or 6
+            return MorningMoneyRadarClient().fetch_snapshot(limit=limit).to_dict()
+
     def search_announcements(arguments: dict[str, Any]) -> dict[str, Any]:
             symbol = normalize_symbol(str(arguments["symbol"]))
             end_date = str(arguments["end_date"])
@@ -169,6 +174,7 @@ def build_builtin_registry(provider: MarketDataProvider, memory_store: LocalMemo
         "get_daily_bars": get_daily_bars,
         "get_market_breadth": get_market_breadth,
         "get_money_flow": get_money_flow,
+        "get_morning_money_radar": get_morning_money_radar,
         "search_announcements": search_announcements,
         "save_analysis_event": save_analysis_event,
         "record_feedback": record_feedback,

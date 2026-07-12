@@ -26,6 +26,14 @@ def decide_rating(
         playbook_skill = next((item for item in skill_insights if item.category == "playbook"), None)
         if playbook_skill and playbook_skill.stage == "不适配":
             weighted = min(weighted, 58)
+        committee_skill = next((item for item in skill_insights if item.skill == "投资流派委员会"), None)
+        if committee_skill and committee_skill.stage.startswith("防守风控派"):
+            weighted = min(weighted, 56)
+        evidence_skill = next((item for item in skill_insights if item.skill == "证据链完整性"), None)
+        if evidence_skill and evidence_skill.score < 70:
+            weighted = min(weighted, 58)
+        if evidence_skill and evidence_skill.score < 55:
+            weighted = min(weighted, 50)
     if invalid_conditions:
         weighted = min(weighted, 55)
     if weighted >= 78:

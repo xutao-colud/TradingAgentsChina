@@ -111,6 +111,24 @@
       }
     },
     {
+      "name": "get_morning_money_radar",
+      "title": "A-share Morning Money Radar",
+      "description": "Get morning sector inflow/outflow rankings and fast-moving stocks for short-line research.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 12,
+            "default": 6,
+            "description": "Maximum rows per radar list."
+          }
+        },
+        "required": []
+      }
+    },
+    {
       "name": "search_announcements",
       "title": "A-share Announcement Search",
       "description": "Search official company announcements and exchange risk letters.",
@@ -214,4 +232,3 @@
     }
   ]
 }
-

@@ -60,6 +60,24 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "get_morning_money_radar",
+        "title": "A-share Intraday Money Radar",
+        "description": "Get intraday sector inflow/outflow rankings and fast-moving stocks for short-line research.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 3,
+                    "maximum": 12,
+                    "default": 6,
+                    "description": "Maximum rows per radar list.",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "search_announcements",
         "title": "A-share Announcement Search",
         "description": "Search official company announcements and exchange risk letters.",
@@ -119,4 +137,3 @@ def find_tool_schema(name: str) -> dict[str, Any] | None:
         if tool["name"] == name:
             return deepcopy(tool)
     return None
-

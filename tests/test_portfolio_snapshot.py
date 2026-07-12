@@ -22,3 +22,9 @@ class PortfolioSnapshotTest(unittest.TestCase):
         self.assertIn("暂不可用", quote_advice(unavailable))
         dropped = RealtimeQuote("600519.SH", "贵州茅台", 1400, 1500, -6.67, 1, 1, "2026-07-11", "14:30:00")
         self.assertIn("跌幅显著", quote_advice(dropped))
+
+    def test_latest_available_quote_is_labelled_but_usable(self) -> None:
+        quote = RealtimeQuote("000725.SZ", "京东方A", 7.59, 8.15, -6.87, 1, 1, "2026-07-10", "10:30:00", data_status="latest_available")
+        advice = quote_advice(quote)
+        self.assertIn("最近可用行情", advice)
+        self.assertIn("跌幅显著", advice)

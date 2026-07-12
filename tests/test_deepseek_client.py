@@ -30,6 +30,14 @@ class DeepSeekClientTest(unittest.TestCase):
         headers = captured["headers"]
         assert isinstance(headers, dict)
         self.assertEqual(headers["Authorization"], "Bearer test-key")
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        messages = payload["messages"]
+        assert isinstance(messages, list)
+        self.assertIn("反推验证", messages[0]["content"])
+        self.assertIn("不要输出隐藏思维链", messages[0]["content"])
+        self.assertIn("反推验证任务", messages[1]["content"])
+        self.assertIn("如果当前结论偏乐观", messages[1]["content"])
 
     def test_explain_requires_api_key(self) -> None:
         report = build_default_workflow().run("600519", "2026-07-10")

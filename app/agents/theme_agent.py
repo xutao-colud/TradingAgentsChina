@@ -5,7 +5,7 @@ from app.schemas.report import AgentFinding, MarketContext, StockProfile
 
 
 def analyze_theme(profile: StockProfile, context: MarketContext) -> AgentFinding:
-    matched = [theme for theme in context.policy_themes if theme in {"消费复苏", "高股息", "国企改革"}]
+    matched = _matched_themes(profile, context.policy_themes)
     score = 50 + len(matched) * 8
     if profile.industry in {"白酒", "食品饮料", "消费"} and "消费复苏" in context.policy_themes:
         score += 10
@@ -25,3 +25,16 @@ def analyze_theme(profile: StockProfile, context: MarketContext) -> AgentFinding
         source_ids=["market-001"],
     )
 
+
+def _matched_themes(profile: StockProfile, themes: list[str]) -> list[str]:
+    industry_map = {
+        "白酒": {"消费复苏", "高股息"},
+        "食品饮料": {"消费复苏", "高股息"},
+        "消费": {"消费复苏", "高股息"},
+        "半导体": {"半导体国产替代", "AI算力"},
+        "显示面板": {"面板国产替代", "OLED", "消费电子", "AI终端"},
+        "机器人": {"机器人", "高端制造"},
+        "电池": {"新能源", "储能"},
+    }
+    candidates = industry_map.get(profile.industry, set())
+    return [theme for theme in themes if theme in candidates or theme == "国企改革"]
