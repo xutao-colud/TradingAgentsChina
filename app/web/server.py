@@ -8,8 +8,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from app.data.providers.eastmoney_provider import EastmoneyRealtimeMarketDataProvider
-from app.graph.workflow import AShareResearchWorkflow, build_default_workflow
+from app.config.runtime import load_runtime_settings
+from app.graph.workflow import AShareResearchWorkflow, build_default_workflow, build_production_workflow
 from app.llm.runtime import ModelRuntime
 from app.mcp.server import McpToolServer
 from app.memory.local_store import LocalMemoryStore
@@ -220,6 +220,7 @@ class ResearchWebApp:
                 feedback_type=feedback_type,
                 user_comment=comment,
                 learned_rule=_optional_string(payload.get("learned_rule")),
+                analysis_report_id=_optional_string(payload.get("analysis_report_id")),
                 outcome_return_pct=_optional_float(payload.get("outcome_return_pct")),
                 outcome_days=_optional_int(payload.get("outcome_days")),
             )
@@ -362,12 +363,14 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
         print(f"[web] {format % args}")
 
 
-def create_server(host: str = "127.0.0.1", port: int = 8000, memory_dir: str = "data/memory") -> ThreadingHTTPServer:
+def create_server(host: str | None = None, port: int | None = None, memory_dir: str = "data/memory", provider_name: str = "production") -> ThreadingHTTPServer:
+    server_config = load_runtime_settings().get("runtime", "local_server")
+    host = host or server_config["host"]
+    port = port if port is not None else server_config["port"]
     snapshot_client = EastmoneyStockSnapshotClient()
-    realtime_provider = EastmoneyRealtimeMarketDataProvider(snapshot_client=snapshot_client)
     TradingDeskHandler.app = ResearchWebApp(
         LocalMemoryStore(memory_dir),
-        workflow=AShareResearchWorkflow(realtime_provider),
+        workflow=build_production_workflow() if provider_name == "production" else build_default_workflow(),
         stock_snapshot_client=snapshot_client,
     )
     TradingDeskHandler.allow_secret_configuration = host in {"127.0.0.1", "localhost", "::1"}
@@ -376,12 +379,14 @@ def create_server(host: str = "127.0.0.1", port: int = 8000, memory_dir: str = "
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local A-share research dashboard.")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host")
+    parser.add_argument("--port", type=int)
     parser.add_argument("--memory-dir", default="data/memory")
+    parser.add_argument("--provider", choices=["production", "sample"], default="production")
     args = parser.parse_args()
-    server = create_server(args.host, args.port, args.memory_dir)
-    print(f"TradingAgentsChina is running at http://{args.host}:{args.port}")
+    server = create_server(args.host, args.port, args.memory_dir, args.provider)
+    actual_host, actual_port = server.server_address[:2]
+    print(f"TradingAgentsChina is running at http://{actual_host}:{actual_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

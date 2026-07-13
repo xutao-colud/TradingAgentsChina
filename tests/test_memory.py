@@ -138,6 +138,30 @@ class LocalMemoryStoreTest(unittest.TestCase):
             self.assertEqual(outcomes[0].analysis_report_id, event.id)
             self.assertEqual(outcomes[0].playbook_id, "trend_core")
             self.assertTrue(outcomes[0].aggregate_consent)
+            self.assertEqual(outcomes[0].market_regime, report.market_regime)
+            self.assertIn("市场周期 Agent", outcomes[0].agent_scores)
+
+    def test_replay_keeps_original_report_and_later_outcome_side_by_side(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalMemoryStore(tmpdir)
+            report = build_default_workflow().run("600519", "2026-07-10", store.load_profile())
+            event = store.save_analysis(report)
+            store.record_feedback(
+                FeedbackEvent(
+                    symbol="600519.SH",
+                    feedback_type="outcome",
+                    user_comment="复盘结果",
+                    analysis_report_id=event.id,
+                    outcome_return_pct=1.2,
+                    outcome_days=5,
+                )
+            )
+
+            replay = store.replay_analysis(event.id)
+
+            self.assertEqual(replay["replay_status"], "outcome_recorded")
+            self.assertEqual(replay["report_snapshot"]["symbol"], "600519.SH")
+            self.assertEqual(len(replay["feedback_events"]), 1)
 
 
 if __name__ == "__main__":

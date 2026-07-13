@@ -24,6 +24,7 @@ class ResearchWebAppTest(unittest.TestCase):
                 }
             )
             self.assertEqual(result["symbol"], "600519.SH")
+            self.assertEqual(result["data_status"], "样例数据")
             self.assertEqual(result["user_question"], "是否符合我的趋势回踩打法？")
             committee = next(item for item in result["skill_insights"] if item["category"] == "committee")
             self.assertEqual(committee["details"]["judge"]["discussion_topic"], "是否符合我的趋势回踩打法？")

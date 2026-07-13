@@ -11,9 +11,9 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
+from app.config.runtime import load_runtime_settings
 
 
-EASTMONEY_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 FetchText = Callable[[str], str]
 
 
@@ -199,24 +199,16 @@ def sample_morning_radar(error: str | None = None, as_of: str | None = None) -> 
 
 
 def _eastmoney_url(params: dict[str, object]) -> str:
-    return EASTMONEY_CLIST_URL + "?" + urlencode(params, safe=",:+")
+    return load_runtime_settings().get("providers", "eastmoney", "clist_url") + "?" + urlencode(params, safe=",:+")
 
 
 def _fetch_text(url: str) -> str:
-    if not url.startswith(EASTMONEY_CLIST_URL):
+    eastmoney = load_runtime_settings().get("providers", "eastmoney")
+    if not url.startswith(eastmoney["clist_url"]):
         raise ValueError("Blocked morning radar URL")
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1",
-            "Accept": "application/json,text/plain,*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Connection": "close",
-            "Referer": "https://quote.eastmoney.com/",
-        },
-    )
+    request = Request(url, headers=eastmoney["headers"])
     try:
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=load_runtime_settings().get("runtime", "network_timeout_seconds")) as response:
             return response.read().decode("utf-8", errors="replace")
     except (OSError, URLError):
         return _fetch_text_with_curl(url)
@@ -226,25 +218,20 @@ def _fetch_text_with_curl(url: str) -> str:
     curl = shutil.which("curl")
     if not curl:
         raise OSError("curl is unavailable and Python HTTP request failed")
+    headers = load_runtime_settings().get("providers", "eastmoney", "headers")
+    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
     completed = subprocess.run(
         [
             curl,
             "--http1.1",
             "-sS",
-            "-H",
-            "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1",
-            "-H",
-            "Accept: application/json,text/plain,*/*",
-            "-H",
-            "Accept-Language: zh-CN,zh;q=0.9",
-            "-H",
-            "Referer: https://quote.eastmoney.com/",
+            *curl_headers,
             url,
         ],
         capture_output=True,
         check=False,
         text=True,
-        timeout=8,
+        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
     )
     if completed.returncode != 0 or not completed.stdout.strip():
         raise OSError((completed.stderr or "curl returned no data").strip())

@@ -6,10 +6,18 @@ from app.data.providers.base import MarketDataProvider
 from app.rules.trading_rules import normalize_symbol
 from app.schemas.report import (
     Announcement,
+    AshareMarketSignals,
+    CapitalFlowObservation,
     DailyPrice,
+    DragonTigerRecord,
     EvidenceSource,
     FundamentalSnapshot,
+    IndustryChainNode,
+    IndustryContext,
+    IndustryFlowObservation,
+    IndustryValuationObservation,
     MarketContext,
+    MarketSentimentObservation,
     MoneyFlowSnapshot,
     StockProfile,
 )
@@ -44,7 +52,7 @@ class SampleMarketDataProvider(MarketDataProvider):
             return _build_price_series(dates, base=74.0, daily_step=0.35, volume_base=72_000_000, amount_scale=78.0)
         return _build_price_series(dates, base=12.0, daily_step=0.05, volume_base=16_000_000, amount_scale=12.5)
 
-    def get_fundamentals(self, symbol: str) -> FundamentalSnapshot:
+    def get_fundamentals(self, symbol: str, analysis_date: str | None = None) -> FundamentalSnapshot:
         normalized = normalize_symbol(symbol)
         if normalized == "600519.SH":
             return FundamentalSnapshot(
@@ -57,12 +65,16 @@ class SampleMarketDataProvider(MarketDataProvider):
                 pb=9.3,
                 cashflow_quality=0.88,
                 forecast_revision="一致预期小幅上修",
+                peer_medians={"revenue_growth_yoy": 10.0, "profit_growth_yoy": 12.0},
+                peer_sample_sizes={"revenue_growth_yoy": 12, "profit_growth_yoy": 12},
+                peer_as_of=analysis_date,
+                peer_source_id="peer-fund-001",
             )
         if normalized == "300750.SZ":
-            return FundamentalSnapshot(12.8, 9.5, 20.3, 23.8, 58.0, 24.5, 4.1, 0.68, "一致预期稳定")
+            return FundamentalSnapshot(12.8, 9.5, 20.3, 23.8, 58.0, 24.5, 4.1, 0.68, "一致预期稳定", peer_medians={"revenue_growth_yoy": 8.0, "profit_growth_yoy": 7.0}, peer_sample_sizes={"revenue_growth_yoy": 12, "profit_growth_yoy": 12}, peer_as_of=analysis_date, peer_source_id="peer-fund-001")
         if normalized == "688981.SH":
-            return FundamentalSnapshot(18.1, 21.0, 9.8, 39.5, 33.0, 55.0, 3.8, 0.61, "景气预期改善")
-        return FundamentalSnapshot(6.0, 4.0, 8.0, 25.0, 45.0, 22.0, 1.8, 0.55, "暂无明显变化")
+            return FundamentalSnapshot(18.1, 21.0, 9.8, 39.5, 33.0, 55.0, 3.8, 0.61, "景气预期改善", peer_medians={"revenue_growth_yoy": 12.0, "profit_growth_yoy": 15.0}, peer_sample_sizes={"revenue_growth_yoy": 12, "profit_growth_yoy": 12}, peer_as_of=analysis_date, peer_source_id="peer-fund-001")
+        return FundamentalSnapshot(6.0, 4.0, 8.0, 25.0, 45.0, 22.0, 1.8, 0.55, "暂无明显变化", peer_medians={"revenue_growth_yoy": 5.0, "profit_growth_yoy": 4.0}, peer_sample_sizes={"revenue_growth_yoy": 12, "profit_growth_yoy": 12}, peer_as_of=analysis_date, peer_source_id="peer-fund-001")
 
     def get_money_flow(self, symbol: str, analysis_date: str) -> MoneyFlowSnapshot:
         normalized = normalize_symbol(symbol)
@@ -80,6 +92,64 @@ class SampleMarketDataProvider(MarketDataProvider):
         if normalized == "688981.SH":
             return MoneyFlowSnapshot(38_000_000, 18_000_000, 0.4, "行业偏好改善", 2.9, "无明显异常")
         return MoneyFlowSnapshot(8_000_000, 2_000_000, -0.1, "暂无明显信号", 1.5, "无明显异常")
+
+    def get_industry_context(self, symbol: str, analysis_date: str) -> IndustryContext:
+        industry = self.get_stock_profile(symbol).industry
+        flow_names = [f"{industry}上游样例", industry, f"{industry}下游样例", "市场其他行业样例"]
+        flows = [
+            IndustryFlowObservation(
+                trade_date=analysis_date,
+                industry=name,
+                industry_code=f"SAMPLE-{index}",
+                net_amount=amount,
+                pct_change=change,
+                company_count=20 + index,
+                source_id="industry-flow-001",
+            )
+            for index, (name, amount, change) in enumerate(zip(
+                flow_names,
+                (220_000_000, 360_000_000, 140_000_000, -180_000_000),
+                (1.2, 1.8, 0.7, -0.8),
+            ), start=1)
+        ]
+        end = _parse_date(analysis_date)
+        valuations = [
+            IndustryValuationObservation(
+                trade_date=(end - timedelta(days=(5 - index) * 30)).isoformat(),
+                pe_ttm_median=18.0 + index,
+                pb_median=2.0 + index * 0.1,
+                sample_size=12,
+                source_ids=["industry-valuation-001"],
+            )
+            for index in range(6)
+        ]
+        return IndustryContext(
+            data_status="sample",
+            industry=industry,
+            as_of=analysis_date,
+            flow_observations=flows,
+            valuation_history=valuations,
+            chain_nodes=[
+                IndustryChainNode("upstream", flow_names[0], "industry-chain-001"),
+                IndustryChainNode("midstream", industry, "industry-chain-001"),
+                IndustryChainNode("downstream", flow_names[2], "industry-chain-001"),
+            ],
+            source_ids=["industry-flow-001", "industry-valuation-001", "industry-chain-001"],
+        )
+
+    def get_capital_flow_history(self, symbol: str, analysis_date: str) -> list[CapitalFlowObservation]:
+        end = _parse_date(analysis_date)
+        dates = [(end - timedelta(days=9 - index)).isoformat() for index in range(10)]
+        return [
+            CapitalFlowObservation(
+                trade_date=trade_date,
+                main_net_inflow=4_000_000 + index * 500_000,
+                northbound_holding_change=100_000 + index * 10_000,
+                margin_balance=1_000_000_000 + index * 5_000_000,
+                source_ids=["flow-history-001", "margin-history-001", "northbound-history-001"],
+            )
+            for index, trade_date in enumerate(dates)
+        ]
 
     def get_announcements(self, symbol: str, analysis_date: str) -> list[Announcement]:
         normalized = normalize_symbol(symbol)
@@ -130,20 +200,46 @@ class SampleMarketDataProvider(MarketDataProvider):
             first_board_count=41,
             second_board_success_rate=36.0,
             strong_stock_return=3.8,
+            sealed_limit_up_rate=82.0,
+            one_price_limit_up_count=6,
+            broken_limit_up_count=16,
+            board_ladder={"1板": 41, "2板": 18, "3板": 8, "4板以上": 5},
+            sentiment_history=[
+                MarketSentimentObservation("2026-07-08", 38, 16, 29.0, 0.6, 3, 24, 26.0, 1.2, sealed_limit_up_rate=71.0, one_price_limit_up_count=2, broken_limit_up_count=16, board_ladder={"1板": 24, "2板": 8, "3板": 4, "4板以上": 2}),
+                MarketSentimentObservation("2026-07-09", 55, 12, 23.0, 1.4, 4, 33, 31.0, 2.1, sealed_limit_up_rate=77.0, one_price_limit_up_count=4, broken_limit_up_count=16, board_ladder={"1板": 33, "2板": 12, "3板": 7, "4板以上": 3}),
+                MarketSentimentObservation("2026-07-10", 72, 8, 18.0, 2.4, 5, 41, 36.0, 3.8, sealed_limit_up_rate=82.0, one_price_limit_up_count=6, broken_limit_up_count=16, board_ladder={"1板": 41, "2板": 18, "3板": 8, "4板以上": 5}),
+            ],
         )
 
     def get_evidence_sources(self, symbol: str, analysis_date: str) -> list[EvidenceSource]:
         normalized = normalize_symbol(symbol)
         sources = [
+            EvidenceSource("profile-001", f"{normalized} 样例证券基础信息", "offline_sample", analysis_date),
             EvidenceSource("price-001", f"{normalized} 样例日线行情", "offline_sample", analysis_date),
             EvidenceSource("fund-001", f"{normalized} 样例财务快照", "offline_sample", analysis_date),
+            EvidenceSource("peer-fund-001", f"{normalized} 样例同行财务中位数", "offline_sample", analysis_date),
             EvidenceSource("flow-001", f"{normalized} 样例资金流", "offline_sample", analysis_date),
+            EvidenceSource("flow-history-001", f"{normalized} 样例主力资金历史", "offline_sample", analysis_date),
+            EvidenceSource("margin-history-001", f"{normalized} 样例融资余额历史", "offline_sample", analysis_date),
+            EvidenceSource("northbound-history-001", f"{normalized} 样例北向变化历史", "offline_sample", analysis_date),
             EvidenceSource("market-001", "A股市场宽度样例", "offline_sample", analysis_date),
+            EvidenceSource("industry-flow-001", f"{normalized} 样例行业资金横截面", "offline_sample", analysis_date),
+            EvidenceSource("industry-valuation-001", f"{normalized} 样例行业估值历史", "offline_sample", analysis_date),
+            EvidenceSource("industry-chain-001", f"{normalized} 样例产业链分类", "offline_sample", analysis_date),
             EvidenceSource("ann-001", f"{normalized} 样例公司公告", "offline_sample", analysis_date),
         ]
         if normalized == "600519.SH":
             sources.append(EvidenceSource("ann-002", f"{normalized} 样例经营数据披露", "offline_sample", analysis_date))
         return sources
+
+    def get_market_signals(self, symbol: str, analysis_date: str) -> AshareMarketSignals:
+        normalized = normalize_symbol(symbol)
+        source = EvidenceSource("dragon-tiger-001", f"{normalized} 样例龙虎榜", "offline_sample", analysis_date)
+        return AshareMarketSignals(
+            data_status="sample",
+            dragon_tiger=[DragonTigerRecord(analysis_date, "样例上榜原因", 0.0, None, source_id="dragon-tiger-001")],
+            evidence_sources=[source],
+        )
 
 
 def _build_price_series(

@@ -1,3 +1,4 @@
-# MVP uses only the Python standard library.
-# Add real data connectors later, for example: akshare, tushare, pandas.
-
+# Production market-data adapters use lazy imports, so offline tests do not
+# require these packages. Install them to enable production data collection.
+akshare>=1.18.40
+tushare>=1.4.24

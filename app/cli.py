@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_default_workflow, build_production_workflow
 from app.llm.config import DeepSeekConfig
 from app.llm.deepseek_client import DeepSeekClient
 from app.memory.local_store import LocalMemoryStore
@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the A-share research-agent MVP.")
     parser.add_argument("symbol", nargs="?", help="A-share symbol, for example 600519 or 600519.SH")
     parser.add_argument("--date", default=today_iso(), help="Analysis date in YYYY-MM-DD format")
+    parser.add_argument("--provider", choices=["production", "sample"], default="production", help="Data provider; production never falls back to sample data")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of Markdown")
     parser.add_argument("--memory-dir", default="data/memory", help="Local memory directory")
     parser.add_argument("--no-save-memory", action="store_true", help="Do not save this analysis to local memory")
@@ -34,6 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--import-memory", metavar="PATH", help="Import and merge a portable personal memory JSON file")
     parser.add_argument("--list-playbooks", action="store_true", help="List public A-share playbook archetypes")
     parser.add_argument("--playbook", metavar="ID", help="Persistently switch the active playbook")
+    parser.add_argument("--replay-analysis", metavar="EVENT_ID", help="Replay one saved analysis with later feedback")
+    parser.add_argument("--analysis-report-id", help="Saved analysis event ID for outcome feedback")
+    parser.add_argument("--outcome-return-pct", type=float, help="Recorded outcome return percentage; requires --feedback-type outcome")
+    parser.add_argument("--outcome-days", type=int, help="Outcome holding days; requires --feedback-type outcome")
     return parser
 
 
@@ -58,6 +63,9 @@ def main() -> None:
         if not args.symbol:
             print(json.dumps({"active_playbook": profile.active_playbook, "trading_profile": profile.to_dict()}, ensure_ascii=False, indent=2))
             return
+    if args.replay_analysis:
+        print(json.dumps(store.replay_analysis(args.replay_analysis), ensure_ascii=False, indent=2))
+        return
     if not args.symbol:
         parser.error("symbol is required unless --export-memory or --import-memory is used")
     if args.feedback:
@@ -67,11 +75,14 @@ def main() -> None:
                 feedback_type=args.feedback_type,
                 user_comment=args.feedback,
                 learned_rule=args.learned_rule,
+                analysis_report_id=args.analysis_report_id,
+                outcome_return_pct=args.outcome_return_pct,
+                outcome_days=args.outcome_days,
             )
         )
         print(json.dumps({"feedback_event": feedback.to_dict(), "trading_profile": store.load_profile().to_dict()}, ensure_ascii=False, indent=2))
         return
-    workflow = build_default_workflow()
+    workflow = build_production_workflow() if args.provider == "production" else build_default_workflow()
     memory_context = store.build_context(args.symbol)
     default_question = f"分析 {args.symbol}（{args.date}）"
     report = workflow.run(args.symbol, args.date, trading_profile=store.load_profile(), user_question=default_question)

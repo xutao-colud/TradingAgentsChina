@@ -18,6 +18,19 @@ def assess_profile_alignment(
     if profile is None:
         return None
 
+    data_readiness = next((item for item in skill_insights if item.category == "data_quality"), None)
+    if data_readiness and data_readiness.score < 70:
+        return SkillInsight(
+            skill="个人交易画像适配",
+            category="personalization",
+            stage="待数据确认",
+            score=0,
+            conclusion="数据就绪性不足，不能判断当前机会是否适合该用户的交易画像。",
+            strategy="保留用户偏好，但先补齐真实、同日期的市场和个股数据。",
+            evidence=[f"交易风格：{profile.style}", f"数据状态：{data_readiness.stage}"],
+            risks=list(data_readiness.risks),
+        )
+
     technical = next((item for item in findings if item.agent == "技术分析 Agent"), None)
     sentiment = next((item for item in skill_insights if item.skill == "情绪周期识别"), None)
     risk = next((item for item in skill_insights if item.skill == "A股风险扫描器"), None)

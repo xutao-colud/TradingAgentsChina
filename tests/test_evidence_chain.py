@@ -46,6 +46,24 @@ class EvidenceChainTest(unittest.TestCase):
         self.assertTrue(any("缺少 source_ids" in item for item in insight.risks))
         self.assertTrue(any("未知来源" in item for item in insight.risks))
 
+    def test_missing_invalidation_conditions_are_not_replayable(self) -> None:
+        finding = AgentFinding(
+            agent="测试 Agent",
+            conclusion="测试结论",
+            score=60,
+            confidence=0.6,
+            evidence=["已计算指标"],
+            risks=["数据可能过期"],
+            counterpoints=["需要更多来源确认"],
+            source_ids=["source-001"],
+        )
+        source = EvidenceSource("source-001", "测试来源", "test", "2026-07-13")
+
+        insight = assess_evidence_chain_quality([finding], [source])
+
+        self.assertLess(insight.score, 90)
+        self.assertTrue(any("失效条件" in item for item in insight.risks))
+
 
 if __name__ == "__main__":
     unittest.main()

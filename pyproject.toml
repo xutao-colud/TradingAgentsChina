@@ -5,6 +5,12 @@ description = "A-share focused multi-agent research MVP inspired by TradingAgent
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+market-data = [
+  "akshare>=1.18.40",
+  "tushare>=1.4.24",
+]
+
 [project.scripts]
 china-trading-agents = "app.cli:main"
 china-stock-mcp = "app.mcp.stdio:main"

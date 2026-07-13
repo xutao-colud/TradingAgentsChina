@@ -42,7 +42,25 @@ python -m unittest discover -s tests
 
 ## MVP Boundary
 
-The default provider is `SampleMarketDataProvider`, so the pipeline is reliable without network access. Real providers should implement `MarketDataProvider` in `app/data/providers/base.py` and can be swapped into `build_default_workflow()`.
+The test/demo workflow uses `SampleMarketDataProvider` and is explicitly marked `样例数据`. The CLI and local web server now default to `ProductionMarketDataProvider`: authenticated Tushare is the primary source, while AkShare supplements public daily bars, northbound holdings and holder-trade records. If a token, package, entitlement, or aligned source is unavailable, the report is downgraded to `数据不足`; it never falls back to sample data.
+
+Install the optional production adapters with `pip install -r requirements.txt`, set `TUSHARE_TOKEN` in the deployment environment (see [market-data.env.example](C:\Users\WIN10\Documents\TradingAgentsChina\config\market-data.env.example)), then run the CLI normally. Use `--provider sample` only for offline demonstration and regression testing. Tushare permissions vary by interface: 龙虎榜、两融、沪深股通持股、业绩预告/快报、限售解禁和股东增减持 may require the appropriate account entitlement. The system reports an unavailable source instead of asserting a missing field is negative or neutral.
+
+### Provider snapshots and quality gates
+
+Production Tushare and AkShare calls are captured before normalization under `data/raw/provider_snapshots/` (override with `TRADINGOS_RAW_SNAPSHOT_DIR`). Each JSON snapshot includes sanitized request parameters, provider/interface, request time, source records, record count, status, and a SHA-256 content hash. Credentials listed in runtime configuration are redacted before persistence.
+
+Normalized daily bars, 龙虎榜 records, and 融资融券 records pass deterministic field/date/range checks before agents can consume them. Failed records are removed rather than converted to neutral values. `AnalysisReport.data_quality_reports` exposes semantic validation and raw-snapshot integrity results, and blocking failures feed the existing data-readiness gate. Provider capability names, dataset rules, snapshot location, redaction keys, and severity behavior live in `config/tradingos.default.json`.
+
+### A股特色市场结构
+
+生产市场状态会从同一交易日的市场宽度与涨跌停池计算封板率、真实炸板率、一字板数量和连板梯队，并将多日观察写入 `sentiment_history`。封板率与炸板率共用“封死涨停 + 炸板”的可审计分母；一字板必须同时满足配置的首次封板时间与零开板次数；连板梯队由配置定义且必须连续覆盖全部板数。字段缺失、梯队无法闭合或比例不一致时，市场状态降级为 `数据不足`。
+
+个股侧增加多日换手率连续变化与价格背离分析。A/H 标的使用 Tushare 官方同日比价记录；接口覆盖期之前、无权限、非 A/H 标的、代码错配、重复记录或比价倍率与溢价不一致时均不参与委员会计分。以上信号只作为可质证的市场情绪、资金参与度或相对估值证据，不产生自动交易指令。
+
+## Configuration first
+
+Mutable runtime settings and investment-rule thresholds live in `config/tradingos.default.json`; set `TRADINGOS_CONFIG_PATH` to point at a validated JSON override. Every report stores the applied rule version and configuration source. Protocol field names, schema contracts, and safety validation remain code-side invariants.
 
 The system is research-only. It should not be used as financial advice or automated trading infrastructure.
 
@@ -96,7 +114,7 @@ Run the first dashboard version:
 python -m app.web.server --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. The page supports analysis, personal-style feedback, portable memory import/export, report rendering, and discovery of mounted MCP tools. It is a local-only app; the web console uses `EastmoneyRealtimeMarketDataProvider` for quote, daily K-line, profile tags, and money-flow data, then falls back to `SampleMarketDataProvider` for fundamentals, announcements, and broad market context until production sources are wired in.
+Open `http://127.0.0.1:8000`. The page supports analysis, personal-style feedback, portable memory import/export, report rendering, and discovery of mounted MCP tools. It is a local-only app; the server defaults to `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It never substitutes `SampleMarketDataProvider` unless the operator explicitly starts it with `--provider sample`.
 
 ### Watchlist, account snapshot, and real-time quotes
 
@@ -125,9 +143,30 @@ python -m app.cli 600519 --date 2026-07-10
 
 The selected playbook is portable with your Memory bundle. Each report gives a fit result, hard disqualifiers, and an optimization note; a playbook cannot override risk gates. Read the full rules and required backtest gate in [the playbook library](docs/v2/playbook-library.md).
 
-Each report also runs an `投资流派委员会` Skill. It compares aggressive hot-money, trend-capacity, institutional growth, value/dividend, policy-cycle, reversal, and defensive routes under the same evidence set, then outputs the current win-rate proxy leader. This is a route-selection signal for research and review, not a promise of future returns. See [the committee design](docs/v3/investment-faction-committee.md).
+Each report first runs a deterministic market-state gate, then evaluates only market-eligible playbooks against the user’s `TradingProfile`. The `投资流派委员会` records evidence, cross-examination, risk challenge, and judge summary for aggressive hot-money, trend-capacity, institutional growth, value/dividend, policy-cycle, reversal, and defensive routes. Its score is an evidence-fit score for research routing—not a win-rate claim, future-return forecast, or order instruction. See [the committee design](docs/v3/investment-faction-committee.md).
 
 ## SaaS evolution reserve
+
+## Intraday, special instruments, and playbook backtests
+
+The production provider now exposes timestamped AkShare minute bars and order-book observations. `盘中分时盘口分析` calculates VWAP, opening/closing volume concentration, recent-volume change, and five-level order-book imbalance. Missing or historical live snapshots stay `unavailable`; order-book imbalance is never presented as proof of a hidden trader's intent.
+
+New/secondary-new stock classification uses the real `list_date`. Convertible-bond research uses Tushare `cb_basic`, `cb_daily`, and the dated underlying-stock close to calculate parity and premium, retaining source ids and official units. These Tushare endpoints require the corresponding account points/permissions.
+
+The backtest engine in `app/backtest/engine.py` enforces close-to-next-open signal timing, T+1 exits, daily-limit/liquidity rejection, commission, stamp duty, and slippage. `trend_core` can use price history directly. `hot_money_leader`, `institutional_growth`, and `institutional_value_dividend` use `PointInTimeDataset`, which hides reports, consensus changes, dividends, and theme memberships until their recorded availability date. Price-only attempts for these three playbooks remain rejected.
+
+```python
+from app.backtest.engine import run_backtest
+from app.backtest.playbook_specs import build_playbook_spec, build_price_playbook_spec
+
+result = run_backtest(profile, daily_bars, build_price_playbook_spec("trend_core"), regimes=regime_by_date, stress=True)
+
+# Point-in-time records must come from a survivorship-aware historical data pipeline.
+spec = build_playbook_spec("institutional_growth", point_in_time_dataset)
+growth_result = run_backtest(profile, daily_bars, spec, regimes=regime_by_date, stress=True)
+```
+
+Small samples do not display an empirical positive-trade rate. Backtest output is research evidence, not a return promise or automatic order.
 
 The current product remains local single-user software, but the codebase now reserves a multi-tenant SaaS boundary: `TenantContext`, consent-gated strategy outcomes, cautious cohort analytics, and a PostgreSQL RLS migration. Account balances and position details are explicitly excluded from cross-user analytics. Read [the SaaS architecture](docs/v3/saas-architecture.md) and [strategy analytics limits](docs/v3/strategy-analytics.md) before exposing the product to external users.
 
@@ -155,4 +194,3 @@ DeepSeek receives the deterministic report and a compact local-memory summary on
 The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis.
 
 For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle, and [the flexibility audit](docs/v3/flexibility-audit.md) for hard-coded areas that should become versioned configuration.
-# TradingAgentsChina

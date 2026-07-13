@@ -8,6 +8,8 @@ def render_markdown(report: AnalysisReport) -> str:
         f"# A股个股智能分析报告：{report.name}（{report.symbol}）",
         "",
         f"- 分析日期：{report.analysis_date}",
+        f"- 数据状态：{report.data_status}",
+        f"- 规则版本：{report.rule_version}",
         f"- 市场状态：{report.market_regime}",
         f"- 综合结论：{report.conclusion}",
         f"- 风险等级：{report.risk_level}",
@@ -73,9 +75,27 @@ def render_markdown(report: AnalysisReport) -> str:
         if finding.counterpoints:
             lines.append("- 反例/限制：")
             lines.extend(f"  - {item}" for item in finding.counterpoints)
+        if finding.invalidation_conditions:
+            lines.append("- 失效条件：")
+            lines.extend(f"  - {item}" for item in finding.invalidation_conditions)
         lines.append("")
-    lines.extend(["## 证据来源", ""])
-    lines.extend(f"- `{source.id}` {source.title}（{source.source_type}，{source.as_of}）" for source in report.evidence_sources)
+    lines.extend(["## 数据质量与原始快照", ""])
+    if report.data_quality_reports:
+        for quality in report.data_quality_reports:
+            snapshot_text = ", ".join(quality.snapshot_ids) if quality.snapshot_ids else "无"
+            lines.append(
+                f"- `{quality.provider}.{quality.dataset}`：{quality.status}，"
+                f"有效 {quality.valid_records}/{quality.checked_records}，快照：{snapshot_text}"
+            )
+            lines.extend(f"  - {issue.severity}: {issue.message}" for issue in quality.issues)
+    else:
+        lines.append("- 未提供数据质量报告。")
+    lines.extend(["", "## 证据来源", ""])
+    lines.extend(
+        f"- `{source.id}` {source.title}（{source.source_type}，{source.as_of}；"
+        f"快照：{', '.join(source.snapshot_ids) if source.snapshot_ids else '无'}）"
+        for source in report.evidence_sources
+    )
     lines.extend(["", f"> {report.disclaimer}", ""])
     return "\n".join(lines)
 

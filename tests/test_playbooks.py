@@ -21,7 +21,7 @@ class PlaybookTest(unittest.TestCase):
         assessment = next(item for item in report.skill_insights if item.category == "playbook")
         self.assertEqual(report.active_playbook, "institutional_growth")
         self.assertEqual(assessment.skill, "公开风格原型适配")
-        self.assertIn(assessment.stage, {"适配", "观察", "不适配"})
+        self.assertIn(assessment.stage, {"适配", "观察", "不适配", "市场不适配", "数据不足"})
 
     def test_hot_money_playbook_rejects_retreating_sentiment(self) -> None:
         findings = [

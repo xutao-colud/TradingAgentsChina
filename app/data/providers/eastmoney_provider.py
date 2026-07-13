@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.data.providers.base import MarketDataProvider
+from app.config.runtime import load_runtime_settings
 from app.data.providers.sample_provider import SampleMarketDataProvider
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient, StockRealtimeSnapshot
 from app.rules.trading_rules import normalize_symbol
@@ -24,7 +25,6 @@ from app.schemas.report import (
 )
 
 
-EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 FetchText = Callable[[str], str]
 
 
@@ -46,7 +46,9 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
         self._fetch_text = fetch_text or _fetch_text
         self._snapshot_cache: dict[str, StockRealtimeSnapshot] = {}
         self._price_sources: dict[str, str] = {}
+        self._price_as_of: dict[str, str] = {}
         self._flow_sources: dict[str, str] = {}
+        self._flow_as_of: dict[str, str] = {}
 
     def get_stock_profile(self, symbol: str) -> StockProfile:
         normalized = normalize_symbol(symbol)
@@ -62,6 +64,9 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
             board=_schema_board(snapshot.market_board) or fallback.board,
             is_st=name.upper().startswith(("ST", "*ST")),
             is_suspended=fallback.is_suspended,
+            concepts=snapshot.concepts,
+            concept_source_id="profile-concept-001",
+            list_date=fallback.list_date,
         )
 
     def get_daily_prices(self, symbol: str, analysis_date: str, lookback_days: int) -> list[DailyPrice]:
@@ -69,18 +74,23 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
         try:
             prices = _prices_from_payload(_load_json(self._fetch_text(_kline_url(normalized, analysis_date, lookback_days))))
         except (OSError, URLError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            snapshot_prices = _prices_from_snapshot(self._snapshot(normalized), analysis_date)
+            snapshot_prices = _prices_from_snapshot_for_date(self._snapshot(normalized), analysis_date)
             self._price_sources[normalized] = "eastmoney_snapshot" if snapshot_prices else "unavailable"
+            if snapshot_prices:
+                self._price_as_of[normalized] = snapshot_prices[-1].trade_date
             return snapshot_prices
         if not prices:
-            snapshot_prices = _prices_from_snapshot(self._snapshot(normalized), analysis_date)
+            snapshot_prices = _prices_from_snapshot_for_date(self._snapshot(normalized), analysis_date)
             self._price_sources[normalized] = "eastmoney_snapshot" if snapshot_prices else "unavailable"
+            if snapshot_prices:
+                self._price_as_of[normalized] = snapshot_prices[-1].trade_date
             return snapshot_prices
         self._price_sources[normalized] = "eastmoney_push2his"
+        self._price_as_of[normalized] = prices[-1].trade_date
         return prices
 
-    def get_fundamentals(self, symbol: str) -> FundamentalSnapshot:
-        return self.fallback.get_fundamentals(symbol)
+    def get_fundamentals(self, symbol: str, analysis_date: str | None = None) -> FundamentalSnapshot:
+        return self.fallback.get_fundamentals(symbol, analysis_date)
 
     def get_money_flow(self, symbol: str, analysis_date: str) -> MoneyFlowSnapshot:
         normalized = normalize_symbol(symbol)
@@ -93,6 +103,7 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
             self._flow_sources[normalized] = "offline_sample"
             return self.fallback.get_money_flow(normalized, analysis_date)
         self._flow_sources[normalized] = "eastmoney_push2his"
+        self._flow_as_of[normalized] = flow.trade_date or analysis_date
         return MoneyFlowSnapshot(
             main_net_inflow=flow.main_net_inflow or 0.0,
             super_large_net_inflow=flow.super_large_net_inflow or 0.0,
@@ -100,6 +111,10 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
             northbound_signal="北向暂未接入；使用东方财富分档资金",
             turnover_rate=snapshot.turnover_rate or 0.0,
             block_trade_signal="大宗交易暂未接入实时源",
+            large_net_inflow=flow.large_net_inflow,
+            medium_net_inflow=flow.medium_net_inflow,
+            small_net_inflow=flow.small_net_inflow,
+            as_of=flow.trade_date,
         )
 
     def get_announcements(self, symbol: str, analysis_date: str) -> list[Announcement]:
@@ -113,8 +128,11 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
         sources = [item for item in self.fallback.get_evidence_sources(normalized, analysis_date) if item.id not in {"price-001", "flow-001"}]
         price_source = self._price_sources.get(normalized, "eastmoney_push2his")
         flow_source = self._flow_sources.get(normalized, "eastmoney_push2his")
-        sources.insert(0, EvidenceSource("flow-001", f"{normalized} 东方财富分档资金流", flow_source, analysis_date))
-        sources.insert(0, EvidenceSource("price-001", f"{normalized} 东方财富日K线行情", price_source, analysis_date))
+        sources.insert(0, EvidenceSource("flow-001", f"{normalized} 东方财富分档资金流", flow_source, self._flow_as_of.get(normalized, analysis_date)))
+        sources.insert(0, EvidenceSource("price-001", f"{normalized} 东方财富日K线行情", price_source, self._price_as_of.get(normalized, analysis_date)))
+        snapshot = self._snapshot_cache.get(normalized)
+        if snapshot and snapshot.concepts:
+            sources.append(EvidenceSource("profile-concept-001", f"{normalized} concept tags", snapshot.source, snapshot.as_of))
         return sources
 
     def _snapshot(self, symbol: str) -> StockRealtimeSnapshot:
@@ -138,7 +156,7 @@ def _kline_url(symbol: str, analysis_date: str, lookback_days: int) -> str:
         "end": _end_date(analysis_date),
         "lmt": max(2, lookback_days),
     }
-    return EASTMONEY_KLINE_URL + "?" + urlencode(params, safe=",:+")
+    return load_runtime_settings().get("providers", "eastmoney", "kline_url") + "?" + urlencode(params, safe=",:+")
 
 
 def _prices_from_payload(payload: dict[str, object]) -> list[DailyPrice]:
@@ -169,10 +187,16 @@ def _prices_from_payload(payload: dict[str, object]) -> list[DailyPrice]:
     return prices
 
 
-def _prices_from_snapshot(snapshot: StockRealtimeSnapshot, analysis_date: str) -> list[DailyPrice]:
-    if snapshot.price is None:
+def _prices_from_snapshot_for_date(snapshot: StockRealtimeSnapshot, analysis_date: str) -> list[DailyPrice]:
+    """Use a quote snapshot only when it is explicitly dated for this request.
+
+    A live quote has insufficient history for MA/volume calculations and must
+    never be relabelled as a user-requested historical analysis date.
+    """
+    snapshot_date = snapshot.money_flow.trade_date if snapshot.money_flow else None
+    if snapshot.price is None or snapshot_date != analysis_date:
         return []
-    trade_date = snapshot.money_flow.trade_date if snapshot.money_flow and snapshot.money_flow.trade_date else analysis_date
+    trade_date = snapshot_date
     latest = DailyPrice(
         trade_date=trade_date,
         open=snapshot.open if snapshot.open is not None else snapshot.price,
@@ -225,18 +249,12 @@ def _schema_board(value: str | None) -> str | None:
 
 
 def _fetch_text(url: str) -> str:
-    if not url.startswith(EASTMONEY_KLINE_URL):
+    eastmoney = load_runtime_settings().get("providers", "eastmoney")
+    if not url.startswith(eastmoney["kline_url"]):
         raise ValueError("Blocked Eastmoney K-line URL")
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1",
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": "https://quote.eastmoney.com/",
-        },
-    )
+    request = Request(url, headers=eastmoney["headers"])
     try:
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=load_runtime_settings().get("runtime", "network_timeout_seconds")) as response:
             body = response.read().decode("utf-8", errors="replace")
             if not body.strip():
                 raise OSError("provider returned empty body")
@@ -249,21 +267,20 @@ def _fetch_text_with_curl(url: str) -> str:
     curl = shutil.which("curl")
     if not curl:
         raise OSError("curl is unavailable and Python HTTP request failed")
+    headers = load_runtime_settings().get("providers", "eastmoney", "headers")
+    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
     completed = subprocess.run(
         [
             curl,
             "--http1.1",
             "-sS",
-            "-H",
-            "User-Agent: TradingAgentsChina/0.1",
-            "-H",
-            "Referer: https://quote.eastmoney.com/",
+            *curl_headers,
             url,
         ],
         capture_output=True,
         check=False,
         text=True,
-        timeout=8,
+        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
     )
     if completed.returncode != 0 or not completed.stdout.strip():
         raise OSError((completed.stderr or "curl returned no data").strip())
