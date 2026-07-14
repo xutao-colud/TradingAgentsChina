@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.memory.models import TradingProfile
 from app.schemas.report import DailyPrice, StockProfile
 from app.data.providers.sample_provider import SampleMarketDataProvider
@@ -30,7 +30,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(any("MA60/MA120" in item and "数据不足" not in item for item in technical.evidence))
 
     def test_workflow_builds_traceable_report(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_sample_workflow().run("600519", "2026-07-10")
         self.assertEqual(report.symbol, "600519.SH")
         self.assertEqual(report.name, "贵州茅台")
         self.assertGreaterEqual(report.fundamental_score, 0)
@@ -50,7 +50,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn("invalidation_conditions", industry.details)
 
     def test_sample_provider_resolves_known_a_share_names(self) -> None:
-        report = build_default_workflow().run("000725.SZ", "2026-07-10")
+        report = build_sample_workflow().run("000725.SZ", "2026-07-10")
         self.assertEqual(report.symbol, "000725.SZ")
         self.assertEqual(report.name, "京东方A")
         theme = next(item for item in report.agent_findings if item.agent == "题材热点 Agent")
@@ -59,7 +59,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(evidence_quality.score, 100)
 
     def test_report_is_json_serializable(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10", user_question="是否适合我的趋势回踩打法？")
+        report = build_sample_workflow().run("600519", "2026-07-10", user_question="是否适合我的趋势回踩打法？")
         encoded = json.dumps(report.to_dict(), ensure_ascii=False)
         self.assertIn("贵州茅台", encoded)
         self.assertIn("是否适合我的趋势回踩打法？", encoded)
@@ -96,7 +96,7 @@ class WorkflowTest(unittest.TestCase):
 
 
     def test_profile_alignment_is_included_when_profile_is_supplied(self) -> None:
-        report = build_default_workflow().run(
+        report = build_sample_workflow().run(
             "600519",
             "2026-07-10",
             trading_profile=TradingProfile(),

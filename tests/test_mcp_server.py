@@ -4,12 +4,13 @@ import tempfile
 import unittest
 
 from app.mcp.server import McpToolServer
+from app.data.providers.sample_provider import SampleMarketDataProvider
 from app.memory.local_store import LocalMemoryStore
 
 
 class McpToolServerTest(unittest.TestCase):
     def test_initialize_and_list_tools(self) -> None:
-        server = McpToolServer()
+        server = McpToolServer(provider=SampleMarketDataProvider())
         initialize = server.handle_request({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         assert initialize is not None
         self.assertEqual(initialize["result"]["protocolVersion"], "2025-06-18")
@@ -19,10 +20,12 @@ class McpToolServerTest(unittest.TestCase):
         names = {tool["name"] for tool in listed["result"]["tools"]}
         self.assertIn("get_realtime_quote", names)
         self.assertIn("record_feedback", names)
+        self.assertIn("scan_opportunity_pool", names)
+        self.assertIn("get_opportunity_pool", names)
 
     def test_quote_and_memory_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            server = McpToolServer(memory_store=LocalMemoryStore(tmpdir))
+            server = McpToolServer(provider=SampleMarketDataProvider(), memory_store=LocalMemoryStore(tmpdir))
             quote = server.handle_request(
                 {
                     "jsonrpc": "2.0",
@@ -73,7 +76,7 @@ class McpToolServerTest(unittest.TestCase):
             self.assertEqual(feedback["result"]["structuredContent"]["profile_version"], 2)
 
     def test_invalid_tool_arguments_return_json_rpc_error(self) -> None:
-        response = McpToolServer().handle_request(
+        response = McpToolServer(provider=SampleMarketDataProvider()).handle_request(
             {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -84,8 +87,27 @@ class McpToolServerTest(unittest.TestCase):
         assert response is not None
         self.assertEqual(response["error"]["code"], -32602)
 
+    def test_opportunity_pool_tools_are_persisted_and_replayable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            server = McpToolServer(provider=SampleMarketDataProvider(), memory_store=LocalMemoryStore(tmpdir))
+            scan = server.call_tool(
+                "scan_opportunity_pool",
+                {
+                    "analysis_date": "2026-07-14",
+                    "symbols": ["600519"],
+                    "include_radar": False,
+                    "maximum_level": 1,
+                },
+            )
+            self.assertEqual(scan["level_counts"]["level1"], 1)
+            self.assertEqual(scan["market_data_status"], "sample")
+            latest = server.call_tool("get_opportunity_pool", {})
+            self.assertEqual(latest["id"], scan["id"])
+            replay = server.call_tool("replay_opportunity_pool", {"event_id": scan["memory_event_id"]})
+            self.assertEqual(replay["pool_snapshot"]["id"], scan["id"])
+
     def test_custom_tool_can_be_registered_without_changing_server(self) -> None:
-        server = McpToolServer()
+        server = McpToolServer(provider=SampleMarketDataProvider())
         server.registry.register(
             {
                 "name": "get_strategy_note",

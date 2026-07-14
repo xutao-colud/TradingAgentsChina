@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from app.data.providers.base import MarketDataProvider
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient, StockRealtimeSnapshot
 from app.rules.trading_rules import normalize_symbol
 from app.schemas.report import (
@@ -75,7 +76,7 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
     def get_daily_prices(self, symbol: str, analysis_date: str, lookback_days: int) -> list[DailyPrice]:
         normalized = normalize_symbol(symbol)
         try:
-            prices = _prices_from_payload(_load_json(self._fetch_text(_kline_url(normalized, analysis_date, lookback_days))))
+            prices = _prices_from_payload(_load_json(self._request_text(_kline_url(normalized, analysis_date, lookback_days))))
         except (OSError, URLError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             snapshot_prices = _prices_from_snapshot_for_date(self._snapshot(normalized), analysis_date)
             self._price_sources[normalized] = "eastmoney_snapshot" if snapshot_prices else "unavailable"
@@ -94,6 +95,9 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
 
     def get_fundamentals(self, symbol: str, analysis_date: str | None = None) -> FundamentalSnapshot:
         return self.fallback.get_fundamentals(symbol, analysis_date)
+
+    def _request_text(self, url: str) -> str:
+        return retry_call(lambda: self._fetch_text(url), operation_name="Eastmoney daily K-line")
 
     def get_money_flow(self, symbol: str, analysis_date: str) -> MoneyFlowSnapshot:
         normalized = normalize_symbol(symbol)

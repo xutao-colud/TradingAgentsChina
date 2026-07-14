@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.schemas.report import AgentFinding, EvidenceSource
 from app.skills.evidence_chain import assess_evidence_chain_quality
 
 
 class EvidenceChainTest(unittest.TestCase):
     def test_default_workflow_has_complete_evidence_chain(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_sample_workflow().run("600519", "2026-07-10")
         insight = next(item for item in report.skill_insights if item.skill == "证据链完整性")
 
         self.assertEqual(insight.category, "quality")

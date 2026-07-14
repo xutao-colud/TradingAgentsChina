@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from app.config.runtime import load_runtime_settings
-from app.graph.workflow import AShareResearchWorkflow, build_default_workflow, build_production_workflow
+from app.graph.workflow import AShareResearchWorkflow, build_default_workflow, build_production_workflow, build_sample_workflow
 from app.llm.runtime import ModelRuntime
 from app.mcp.server import McpToolServer
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
+from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
@@ -40,9 +41,17 @@ class ResearchWebApp:
         self.workflow = workflow or build_default_workflow()
         self.mcp_server = McpToolServer(provider=self.workflow.provider, memory_store=memory_store)
         self.quote_client = quote_client or SinaRealtimeQuoteClient()
-        self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient()
+        self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient(
+            quote_fetcher=self.quote_client.fetch_quotes
+        )
         self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
         self.model_runtime = model_runtime or ModelRuntime(memory_store.root / "model_settings.json")
+        self.opportunity_pipeline = OpportunityPipeline(
+            self.workflow,
+            memory_store,
+            stock_snapshot_client=self.stock_snapshot_client,
+            morning_radar_client=self.morning_radar_client,
+        )
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "mode": "local", "data_provider": type(self.workflow.provider).__name__}
@@ -156,8 +165,99 @@ class ResearchWebApp:
 
     def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
-        limit = _optional_int(payload.get("limit")) or 6
-        return self.morning_radar_client.fetch_snapshot(limit=limit).to_dict()
+        settings = load_runtime_settings().get("morning_radar")
+        limit = _optional_int(payload.get("limit")) or settings["default_limit"]
+        radar = self.morning_radar_client.fetch_snapshot(
+            limit=limit,
+            fallback_symbols=self._radar_tracked_symbols(),
+        )
+        if radar.data_status == "tracked_universe" and self.stock_snapshot_client:
+            radar = self._enrich_tracked_radar_money_flow(radar)
+        return radar.to_dict()
+
+    def _enrich_tracked_radar_money_flow(self, radar: Any) -> Any:
+        """Attach verified per-stock flow only; never substitute it for sector flow."""
+        symbols = [item.symbol for item in radar.fast_movers]
+        snapshots = self.stock_snapshot_client.fetch_snapshots(symbols)
+        enriched = []
+        has_verified_flow = False
+        for item in radar.fast_movers:
+            snapshot = snapshots.get(item.symbol)
+            if snapshot is None or snapshot.data_status == "unavailable":
+                enriched.append(item)
+                continue
+            flow = snapshot.money_flow
+            has_verified_flow = has_verified_flow or (flow is not None and flow.main_net_inflow is not None)
+            enriched.append(
+                replace(
+                    item,
+                    name=snapshot.name or item.name,
+                    price=snapshot.price if snapshot.price is not None else item.price,
+                    change_pct=snapshot.change_pct if snapshot.change_pct is not None else item.change_pct,
+                    amount=snapshot.amount if snapshot.amount is not None else item.amount,
+                    main_net_inflow=flow.main_net_inflow if flow else None,
+                    main_net_inflow_ratio=flow.main_net_inflow_ratio if flow else None,
+                    trigger_reason=(
+                        f"{item.trigger_reason} 行业：{snapshot.industry or '未披露'}；"
+                        "个股主力资金来自东方财富个股快照。"
+                        if flow and flow.main_net_inflow is not None
+                        else item.trigger_reason
+                    ),
+                )
+            )
+        if not has_verified_flow:
+            return radar
+        return replace(
+            radar,
+            source=f"{radar.source}+eastmoney_stock_flow",
+            fast_movers=enriched,
+            risks=[
+                *radar.risks,
+                "个股主力资金为逐股快照，不能替代全市场板块资金流。",
+            ],
+        )
+
+    def _radar_tracked_symbols(self) -> list[str]:
+        settings = load_runtime_settings().get("morning_radar")
+        pool = self.memory_store.load_opportunity_pool() or {}
+        symbols = [item["symbol"] for item in self.memory_store.load_watchlist()]
+        symbols.extend(item["symbol"] for item in self.memory_store.load_portfolio()["positions"])
+        symbols.extend(
+            item["symbol"]
+            for item in pool.get("candidates", [])
+            if isinstance(item, dict) and isinstance(item.get("symbol"), str)
+        )
+        return list(dict.fromkeys(symbols))[: settings["fallback_maximum_symbols"]]
+
+    def opportunity_pool(self) -> dict[str, Any]:
+        pool = self.memory_store.load_opportunity_pool()
+        return pool or {
+            "pipeline_status": "not_run",
+            "candidates": [],
+            "excluded": [],
+            "disclaimer": load_runtime_settings().get("opportunity_pipeline", "disclaimer"),
+        }
+
+    def scan_opportunities(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_symbols = payload.get("symbols", [])
+        if not isinstance(raw_symbols, list) or any(not isinstance(item, str) for item in raw_symbols):
+            raise ValueError("symbols must be an array of stock symbols")
+        analysis_date = payload.get("analysis_date")
+        if not isinstance(analysis_date, str) or not analysis_date:
+            raise ValueError("analysis_date is required")
+        maximum_level = _optional_int(payload.get("maximum_level")) or 3
+        return self.opportunity_pipeline.run(
+            analysis_date=analysis_date,
+            explicit_symbols=raw_symbols,
+            include_radar=payload.get("include_radar") is not False,
+            maximum_level=maximum_level,
+        )
+
+    def replay_opportunity(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event_id = payload.get("event_id")
+        if not isinstance(event_id, str) or not event_id:
+            raise ValueError("event_id is required")
+        return self.memory_store.replay_opportunity_run(event_id)
 
     def analyze(self, payload: dict[str, Any]) -> dict[str, Any]:
         symbol = payload.get("symbol")
@@ -260,6 +360,9 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
         if self.path == "/api/models":
             self._write_json(HTTPStatus.OK, self.app.model_status())
             return
+        if self.path == "/api/opportunities":
+            self._write_json(HTTPStatus.OK, self.app.opportunity_pool())
+            return
         self._serve_static()
 
     def do_POST(self) -> None:  # noqa: N802
@@ -285,6 +388,10 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.OK, self.app.refresh_market())
             elif self.path == "/api/morning/radar":
                 self._write_json(HTTPStatus.OK, self.app.morning_radar(payload))
+            elif self.path == "/api/opportunities/scan":
+                self._write_json(HTTPStatus.OK, self.app.scan_opportunities(payload))
+            elif self.path == "/api/opportunities/replay":
+                self._write_json(HTTPStatus.OK, self.app.replay_opportunity(payload))
             elif self.path == "/api/models/configure":
                 if not self.allow_secret_configuration:
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
@@ -370,7 +477,7 @@ def create_server(host: str | None = None, port: int | None = None, memory_dir: 
     snapshot_client = EastmoneyStockSnapshotClient()
     TradingDeskHandler.app = ResearchWebApp(
         LocalMemoryStore(memory_dir),
-        workflow=build_production_workflow() if provider_name == "production" else build_default_workflow(),
+        workflow=build_production_workflow() if provider_name == "production" else build_sample_workflow(),
         stock_snapshot_client=snapshot_client,
     )
     TradingDeskHandler.allow_secret_configuration = host in {"127.0.0.1", "localhost", "::1"}
@@ -378,7 +485,7 @@ def create_server(host: str | None = None, port: int | None = None, memory_dir: 
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the local A-share research dashboard.")
+    parser = argparse.ArgumentParser(description="Run the A-share research dashboard on the configured local or LAN interface.")
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
     parser.add_argument("--memory-dir", default="data/memory")
@@ -386,7 +493,11 @@ def main() -> None:
     args = parser.parse_args()
     server = create_server(args.host, args.port, args.memory_dir, args.provider)
     actual_host, actual_port = server.server_address[:2]
-    print(f"TradingAgentsChina is running at http://{actual_host}:{actual_port}")
+    if actual_host in {"0.0.0.0", "::"}:
+        print(f"TradingAgentsChina is running locally at http://127.0.0.1:{actual_port}")
+        print("LAN access is enabled. Use this computer's private IPv4 address with the same port on trusted networks only.")
+    else:
+        print(f"TradingAgentsChina is running at http://{actual_host}:{actual_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

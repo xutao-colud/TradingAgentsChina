@@ -38,3 +38,19 @@ class SinaRealtimeQuoteClientTest(unittest.TestCase):
         self.assertEqual(quote.data_status, "unavailable")
         with self.assertRaisesRegex(ValueError, "does not support BJ"):
             client.fetch_quotes(["430001.BJ"])
+
+    def test_retries_transient_quote_fetch_failure(self) -> None:
+        calls = 0
+
+        def fetch_text(url: str) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("connection reset")
+            return _line("sh600519", "贵州茅台", "1500.00", "1515.00")
+
+        client = SinaRealtimeQuoteClient(fetch_text=fetch_text, now=lambda: datetime(2026, 7, 13, 10, 0, 0))
+        quote = client.fetch_quotes(["600519"])["600519.SH"]
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(quote.data_status, "real_time")

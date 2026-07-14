@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
 
 
 _LINE_PATTERN = re.compile(r'var hq_str_([a-z]{2}\d{6})="([^"]*)";')
@@ -54,7 +55,7 @@ class SinaRealtimeQuoteClient:
             return {}
         url = load_runtime_settings().get("providers", "sina", "quote_url") + ",".join(identifiers.values())
         try:
-            raw = self._fetch_text(url)
+            raw = retry_call(lambda: self._fetch_text(url), operation_name="Sina real-time quote")
             parsed = _parse_response(raw, identifiers, self._now())
         except (URLError, OSError, ValueError) as exc:
             return {symbol: _unavailable_quote(symbol, str(exc)) for symbol in normalized}

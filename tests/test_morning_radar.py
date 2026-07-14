@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime
 
 from app.market.morning_radar import MorningMoneyRadarClient, sample_morning_radar
+from app.market.realtime import RealtimeQuote
 
 
 def _payload(rows):
@@ -42,6 +43,37 @@ class MorningRadarTest(unittest.TestCase):
         self.assertTrue(snapshot.error)
         self.assertFalse(snapshot.top_inflow_sectors)
         self.assertIn("不展示样例", snapshot.shortline_read)
+
+    def test_uses_scoped_quote_fallback_when_market_wide_provider_disconnects(self) -> None:
+        def quotes(symbols: list[str]) -> dict[str, RealtimeQuote]:
+            self.assertEqual(symbols, ["000725.SZ"])
+            return {
+                "000725.SZ": RealtimeQuote(
+                    symbol="000725.SZ",
+                    name="BOE",
+                    price=7.02,
+                    previous_close=6.83,
+                    change_pct=2.78,
+                    volume=29_367_326,
+                    amount=20_295_239_099,
+                    trade_date="2026-07-14",
+                    trade_time="15:35:45",
+                )
+            }
+
+        client = MorningMoneyRadarClient(
+            fetch_text=lambda url: (_ for _ in ()).throw(OSError("curl: (56) Failure when receiving data from the peer")),
+            quote_fetcher=quotes,
+            now=lambda: datetime(2026, 7, 14, 14, 0, 0),
+        )
+        snapshot = client.fetch_snapshot(limit=3, fallback_symbols=["000725.SZ"])
+
+        self.assertEqual(snapshot.data_status, "tracked_universe")
+        self.assertEqual(snapshot.source, "sina_tracked_universe")
+        self.assertEqual(snapshot.as_of, "2026-07-14T15:35:45")
+        self.assertEqual(snapshot.fast_movers[0].symbol, "000725.SZ")
+        self.assertIsNone(snapshot.fast_movers[0].main_net_inflow)
+        self.assertNotIn("curl: (56)", snapshot.error or "")
 
     def test_public_provider_data_is_latest_available_outside_trading_hours(self) -> None:
         responses = [

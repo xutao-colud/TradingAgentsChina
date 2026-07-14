@@ -12,9 +12,12 @@ from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
+from app.market.realtime import RealtimeQuote
 
 
 FetchText = Callable[[str], str]
+QuoteFetcher = Callable[[list[str]], dict[str, RealtimeQuote]]
 
 
 @dataclass(frozen=True)
@@ -74,12 +77,20 @@ class MorningMoneyRadarClient:
     inspect `data_status` and `source` before treating the result as live.
     """
 
-    def __init__(self, fetch_text: FetchText | None = None, now: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        fetch_text: FetchText | None = None,
+        now: Callable[[], datetime] | None = None,
+        quote_fetcher: QuoteFetcher | None = None,
+    ) -> None:
         self._fetch_text = fetch_text or _fetch_text
         self._now = now or datetime.now
+        self._quote_fetcher = quote_fetcher
 
-    def fetch_snapshot(self, limit: int = 6) -> MorningRadarSnapshot:
-        safe_limit = max(3, min(12, int(limit)))
+    def fetch_snapshot(self, limit: int | None = None, fallback_symbols: list[str] | None = None) -> MorningRadarSnapshot:
+        settings = load_runtime_settings().get("morning_radar")
+        requested_limit = settings["default_limit"] if limit is None else int(limit)
+        safe_limit = max(settings["minimum_limit"], min(settings["maximum_limit"], requested_limit))
         try:
             inflow = self._fetch_sector_flows(sort_desc=True, limit=safe_limit)
             outflow = self._fetch_sector_flows(sort_desc=False, limit=safe_limit)
@@ -107,11 +118,76 @@ class MorningMoneyRadarClient:
                 risks=risks,
             )
         except (OSError, URLError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            fallback = self._tracked_universe_fallback(
+                fallback_symbols or [],
+                safe_limit,
+            )
+            if fallback is not None:
+                return fallback
             return unavailable_morning_radar(error=str(exc), as_of=self._now().isoformat(timespec="seconds"))
+
+    def _tracked_universe_fallback(
+        self,
+        symbols: list[str],
+        limit: int,
+    ) -> MorningRadarSnapshot | None:
+        """Return a clearly scoped quote-only fallback; never call it market-wide."""
+        if self._quote_fetcher is None:
+            return None
+        settings = load_runtime_settings().get("morning_radar")
+        tracked = list(dict.fromkeys(symbols))[: settings["fallback_maximum_symbols"]]
+        if not tracked:
+            return None
+        quotes = self._quote_fetcher(tracked)
+        available = [
+            quote
+            for quote in quotes.values()
+            if quote.data_status != "unavailable" and quote.price is not None and quote.change_pct is not None
+        ]
+        if not available:
+            return None
+        movers = [
+            FastMover(
+                symbol=quote.symbol,
+                name=quote.name or quote.symbol,
+                price=quote.price,
+                change_pct=quote.change_pct,
+                speed_pct=None,
+                amount=quote.amount,
+                main_net_inflow=None,
+                main_net_inflow_ratio=None,
+                trigger_reason="跟踪池涨跌幅排序；该降级源不含板块资金流和主力资金字段。",
+            )
+            for quote in sorted(
+                available,
+                key=lambda item: (item.change_pct or 0, item.amount or 0),
+                reverse=True,
+            )[:limit]
+        ]
+        now = self._now()
+        return MorningRadarSnapshot(
+            as_of=_latest_quote_as_of(available, now),
+            source="sina_tracked_universe",
+            data_status="tracked_universe",
+            market_phase=_market_phase(now),
+            top_inflow_sectors=[],
+            top_outflow_sectors=[],
+            fast_movers=movers,
+            shortline_read=(
+                "东方财富全市场盘中雷达暂不可用。当前仅展示已核验的自选、持仓和机会池报价快照；"
+                "不得据此推断全市场板块资金流。"
+            ),
+            risks=[
+                "降级源只覆盖跟踪池，不代表全市场。",
+                "该源不提供板块资金流、主力净流入和涨速；相关字段已明确留空。",
+                "降级雷达不生成交易指令。",
+            ],
+            error="东方财富全市场列表接口暂不可用，已启用跟踪池报价快照降级。",
+        )
 
     def _fetch_sector_flows(self, sort_desc: bool, limit: int) -> list[SectorFlow]:
         payload = _load_json(
-            self._fetch_text(
+            self._request_text(
                 _eastmoney_url(
                     {
                         "pn": 1,
@@ -131,7 +207,7 @@ class MorningMoneyRadarClient:
 
     def _fetch_fast_movers(self, limit: int) -> list[FastMover]:
         payload = _load_json(
-            self._fetch_text(
+            self._request_text(
                 _eastmoney_url(
                     {
                         "pn": 1,
@@ -148,6 +224,9 @@ class MorningMoneyRadarClient:
             )
         )
         return [_mover_from_row(row) for row in _diff_rows(payload)]
+
+    def _request_text(self, url: str) -> str:
+        return retry_call(lambda: self._fetch_text(url), operation_name="Eastmoney morning radar")
 
 
 def unavailable_morning_radar(error: str | None = None, as_of: str | None = None) -> MorningRadarSnapshot:
@@ -303,6 +382,18 @@ def _num(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _latest_quote_as_of(quotes: list[RealtimeQuote], fallback: datetime) -> str:
+    timestamps: list[datetime] = []
+    for quote in quotes:
+        if not quote.trade_date or not quote.trade_time:
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(f"{quote.trade_date}T{quote.trade_time}"))
+        except ValueError:
+            continue
+    return (max(timestamps) if timestamps else fallback).isoformat(timespec="seconds")
 
 
 def _market_phase(now: datetime) -> str:

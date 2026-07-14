@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from app.config.runtime import load_runtime_settings
 from app.schemas.report import AgentFinding, SkillInsight
 from app.skills.common import clamp_score
 
 
 def score_stock_composite(findings: list[AgentFinding], skill_insights: list[SkillInsight]) -> SkillInsight:
+    config = load_runtime_settings().get("scoring", "stock_score_model")
     data_readiness = next((item for item in skill_insights if item.category == "data_quality"), None)
-    if data_readiness and data_readiness.score < 70:
+    if data_readiness and data_readiness.score < config["readiness_threshold"]:
         return SkillInsight(
             skill="股票综合评分模型",
             category="decision",
@@ -25,13 +27,13 @@ def score_stock_composite(findings: list[AgentFinding], skill_insights: list[Ski
         and item.details.get("admitted") is not False
     ]
     skill_score = sum(item.score for item in signal_skills) / max(1, len(signal_skills))
-    risk_penalty = sum(1 for item in skill_insights if item.category == "risk" and item.score < 60) * 8
-    total = clamp_score(agent_score * 0.62 + skill_score * 0.38 - risk_penalty)
-    if total >= 78:
+    risk_penalty = sum(1 for item in skill_insights if item.category == "risk" and item.score < config["risk_threshold"]) * config["risk_penalty"]
+    total = clamp_score(agent_score * config["agent_weight"] + skill_score * config["skill_weight"] - risk_penalty)
+    if total >= config["strong_threshold"]:
         stage = "强"
-    elif total >= 65:
+    elif total >= config["positive_threshold"]:
         stage = "偏强"
-    elif total >= 50:
+    elif total >= config["neutral_threshold"]:
         stage = "中性"
     else:
         stage = "偏弱"

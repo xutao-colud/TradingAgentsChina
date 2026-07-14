@@ -40,15 +40,53 @@ Run tests:
 python -m unittest discover -s tests
 ```
 
+## Opportunity pool and three-level analysis
+
+The opportunity pipeline avoids running the full research workflow across the
+entire market. It first combines local positions, watchlist symbols, explicit
+candidates, and verified radar movers, then applies bounded promotion gates:
+
+- **L1**: deterministic lightweight snapshot scan; no LLM and no deep provider fan-out.
+- **L2**: full structured agents and skills without the investment committee.
+- **L3**: court-style committee only after market status, data readiness,
+  evidence-chain quality, and L2 research gates pass.
+
+The opportunity score measures current evidence coverage and playbook/profile
+fit. It is not a win rate, return forecast, or trading instruction. Missing
+fields reduce coverage and can block promotion; they are never filled with a
+neutral fact.
+
+```powershell
+# Positions + watchlist + verified radar, through L3 gates
+python -m app.cli --opportunity-scan --date 2026-07-14
+
+# Add explicit candidates and stop after the fast deterministic scan
+python -m app.cli 600519 --opportunity-scan --opportunity-symbol 000725 --opportunity-level 1 --no-radar
+
+# Read or replay the locally persisted pool
+python -m app.cli --list-opportunity-pool
+python -m app.cli --replay-opportunity <EVENT_ID>
+```
+
+Web endpoints are `GET /api/opportunities`, `POST /api/opportunities/scan`, and
+`POST /api/opportunities/replay`. MCP exposes `scan_opportunity_pool`,
+`get_opportunity_pool`, and `replay_opportunity_pool`. Local runs are persisted
+under the configured Memory directory; the SaaS target schema is in
+`database/migrations/002_opportunity_pool_pipeline.sql`.
+
 ## MVP Boundary
 
 The test/demo workflow uses `SampleMarketDataProvider` and is explicitly marked `样例数据`. The CLI and local web server now default to `ProductionMarketDataProvider`: authenticated Tushare is the primary source, while AkShare supplements public daily bars, northbound holdings and holder-trade records. If a token, package, entitlement, or aligned source is unavailable, the report is downgraded to `数据不足`; it never falls back to sample data.
 
 Install the optional production adapters with `pip install -r requirements.txt`, set `TUSHARE_TOKEN` in the deployment environment (see [market-data.env.example](C:\Users\WIN10\Documents\TradingAgentsChina\config\market-data.env.example)), then run the CLI normally. Use `--provider sample` only for offline demonstration and regression testing. Tushare permissions vary by interface: 龙虎榜、两融、沪深股通持股、业绩预告/快报、限售解禁和股东增减持 may require the appropriate account entitlement. The system reports an unavailable source instead of asserting a missing field is negative or neutral.
 
+The risk layer also consumes point-in-time goodwill/net-assets, Tushare equity-pledge statistics, important-shareholder reductions, CNInfo inquiry letters, and rolling amount/turnover observations. Every check reports its source, observation time, counterpoint, risk, and invalidation condition. Thresholds, lookback windows, deductions, and grade boundaries are runtime configuration; failed or unentitled queries remain `数据不足` and are never converted to zero risk.
+
 ### Provider snapshots and quality gates
 
 Production Tushare and AkShare calls are captured before normalization under `data/raw/provider_snapshots/` (override with `TRADINGOS_RAW_SNAPSHOT_DIR`). Each JSON snapshot includes sanitized request parameters, provider/interface, request time, source records, record count, status, and a SHA-256 content hash. Credentials listed in runtime configuration are redacted before persistence.
+
+AkShare's global holder-trade query is disabled by default because it can return more than 100,000 rows and cannot produce a complete replay snapshot within the configured snapshot limit. Tushare's symbol-level holder-trade interface is the production default. Operators may explicitly enable the AkShare bulk query in runtime configuration for controlled data-ingestion jobs; interactive analysis never treats the disabled query as “no reduction”.
 
 Normalized daily bars, 龙虎榜 records, and 融资融券 records pass deterministic field/date/range checks before agents can consume them. Failed records are removed rather than converted to neutral values. `AnalysisReport.data_quality_reports` exposes semantic validation and raw-snapshot integrity results, and blocking failures feed the existing data-readiness gate. Provider capability names, dataset rules, snapshot location, redaction keys, and severity behavior live in `config/tradingos.default.json`.
 
@@ -111,10 +149,12 @@ The import keeps existing local events and merges new reports, feedback, and que
 Run the first dashboard version:
 
 ```powershell
-python -m app.web.server --port 8000
+python -m app.web.server --host 0.0.0.0 --port 8000
 ```
 
-Open `http://127.0.0.1:8000`. The page supports analysis, personal-style feedback, portable memory import/export, report rendering, and discovery of mounted MCP tools. It is a local-only app; the server defaults to `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It never substitutes `SampleMarketDataProvider` unless the operator explicitly starts it with `--provider sample`.
+On this computer, open `http://127.0.0.1:8000`. Devices on the same trusted Wi-Fi/LAN can use `http://<this-computer's-IPv4>:8000`; run `ipconfig` on Windows to find the IPv4 address. The dashboard listens on all local network interfaces, but model-key configuration remains disabled for non-local requests. Keep the firewall rule on the **Private** profile only and do not expose or port-forward this service to the public internet.
+
+The server defaults to `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It never substitutes `SampleMarketDataProvider` unless the operator explicitly starts it with `--provider sample`.
 
 ### Watchlist, account snapshot, and real-time quotes
 
@@ -129,7 +169,7 @@ Watchlist and portfolio data are included in `trading-agents-memory.json` export
 
 ### Morning money radar
 
-The dashboard includes a short-line `早盘资金雷达` panel. It ranks sector main-force inflow, sector outflow, and fast-moving stocks through `MorningMoneyRadarClient`, with an offline sample fallback when the public provider is unavailable. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
+The dashboard includes a short-line `早盘资金雷达` panel. It ranks sector main-force inflow, sector outflow, and fast-moving stocks through `MorningMoneyRadarClient`. When the public provider is unavailable it returns `unavailable` and no sample movers; offline samples are available only through explicit test/demo helpers. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
 
 ## Switchable A-share playbooks
 
@@ -176,7 +216,7 @@ The current product remains local single-user software, but the codebase now res
 python -m app.mcp.stdio
 ```
 
-The current runtime uses the offline sample provider, so its quote tools return `data_status: latest_available` rather than claiming live market data. Swap in an authenticated production provider before relying on it for real-time facts.
+The MCP runtime defaults to `ProductionMarketDataProvider`. It uses only configured production sources, returns explicit unavailable/data-insufficient states when a source cannot be verified, and never substitutes offline sample records. The sample provider is available only through explicit test/demo construction.
 
 ## Optional DeepSeek explanation
 

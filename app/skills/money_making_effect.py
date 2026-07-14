@@ -6,6 +6,7 @@ from app.skills.common import clamp_score, stage_by_score
 
 
 def assess_money_making_effect(context: MarketContext) -> SkillInsight:
+    config = load_runtime_settings().get("scoring", "money_making_effect")
     required = {
         "first_board_count": context.first_board_count,
         "second_board_success_rate": context.second_board_success_rate,
@@ -24,11 +25,11 @@ def assess_money_making_effect(context: MarketContext) -> SkillInsight:
             evidence=[f"缺失字段：{', '.join(missing) if missing else '无'}"],
             risks=list(context.unavailable_reasons) or ["缺失字段未按零值计算。"],
         )
-    score = 40
-    score += min(20, int(context.first_board_count) * 0.35)
-    score += min(20, float(context.second_board_success_rate) * 0.35)
-    score += min(18, float(context.strong_stock_return) * 4)
-    score -= min(18, float(context.failed_breakout_rate) * 0.45)
+    score = float(config["base_score"])
+    score += min(float(config["first_board_cap"]), int(context.first_board_count) * float(config["first_board_weight"]))
+    score += min(float(config["second_board_cap"]), float(context.second_board_success_rate) * float(config["second_board_weight"]))
+    score += min(float(config["strong_return_cap"]), float(context.strong_stock_return) * float(config["strong_return_weight"]))
+    score -= min(float(config["failed_breakout_cap"]), float(context.failed_breakout_rate) * float(config["failed_breakout_weight"]))
     final_score = clamp_score(score)
     stage = stage_by_score(final_score, "较差", "一般", "良好", "强势")
     return SkillInsight(

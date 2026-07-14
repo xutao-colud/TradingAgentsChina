@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.llm.config import DeepSeekConfig
 from app.llm.deepseek_client import DeepSeekClient
 
@@ -17,7 +17,7 @@ class DeepSeekClientTest(unittest.TestCase):
             captured["payload"] = payload
             return {"choices": [{"message": {"content": "证据链清晰，但仍需核验公告原文。"}}]}
 
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_sample_workflow().run("600519", "2026-07-10")
         explained = DeepSeekClient(DeepSeekConfig(api_key="test-key"), post_json=fake_post).explain(
             report,
             {"trading_profile": {"style": "趋势+价值混合"}},
@@ -42,6 +42,6 @@ class DeepSeekClientTest(unittest.TestCase):
         self.assertIn("如果当前结论偏乐观", messages[1]["content"])
 
     def test_explain_requires_api_key(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_sample_workflow().run("600519", "2026-07-10")
         with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY"):
             DeepSeekClient(DeepSeekConfig(api_key=None)).explain(report, {})

@@ -6,6 +6,7 @@ from app.skills.common import clamp_score, stage_by_score
 
 
 def assess_market_temperature(context: MarketContext) -> SkillInsight:
+    config = load_runtime_settings().get("scoring", "market_temperature")
     required = {
         "index_change_pct": context.index_change_pct,
         "total_amount": context.total_amount,
@@ -31,9 +32,17 @@ def assess_market_temperature(context: MarketContext) -> SkillInsight:
     advancers = int(context.advancers)
     decliners = int(context.decliners)
     breadth = advancers / max(1, advancers + decliners)
-    amount_score = min(18, float(context.total_amount) / 100_000_000_000)
-    limit_score = min(16, int(context.limit_up_count) / 5) - min(12, int(context.limit_down_count) / 2)
-    score = 42 + float(context.index_change_pct) * 9 + (breadth - 0.5) * 70 + amount_score + limit_score
+    amount_score = min(float(config["amount_cap"]), float(context.total_amount) / float(config["amount_divisor"]))
+    limit_score = min(float(config["limit_up_cap"]), int(context.limit_up_count) / float(config["limit_up_divisor"])) - min(
+        float(config["limit_down_cap"]), int(context.limit_down_count) / float(config["limit_down_divisor"])
+    )
+    score = (
+        float(config["base_score"])
+        + float(context.index_change_pct) * float(config["index_change_weight"])
+        + (breadth - float(config["breadth_center"])) * float(config["breadth_weight"])
+        + amount_score
+        + limit_score
+    )
     final_score = clamp_score(score)
     stage = stage_by_score(final_score, "防守", "震荡", "震荡修复", "进攻")
     strategy = {
@@ -50,7 +59,7 @@ def assess_market_temperature(context: MarketContext) -> SkillInsight:
         conclusion=f"市场温度处于{stage}区间",
         strategy=strategy,
         evidence=[
-            f"成交额 {float(context.total_amount) / 100_000_000:.0f} 亿元",
+            f"成交额 {float(context.total_amount) / float(config['amount_display_divisor']):.0f} 亿元",
             f"上涨比例 {breadth * 100:.1f}%",
             f"涨停/跌停 {context.limit_up_count}/{context.limit_down_count}",
             f"{context.index_name}涨跌幅 {float(context.index_change_pct):.2f}%",

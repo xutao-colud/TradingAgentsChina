@@ -20,6 +20,8 @@ class LocalMemoryStore:
         self.interaction_path = self.root / "interaction_events.jsonl"
         self.watchlist_path = self.root / "watchlist.json"
         self.portfolio_path = self.root / "portfolio.json"
+        self.opportunity_pool_path = self.root / "opportunity_pool.json"
+        self.opportunity_event_path = self.root / "opportunity_events.jsonl"
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -127,7 +129,13 @@ class LocalMemoryStore:
         self._write_json(self.portfolio_path, portfolio)
         return portfolio
 
-    def save_analysis(self, report: AnalysisReport, user_query: str | None = None, model_name: str | None = None) -> MemoryEvent:
+    def save_analysis(
+        self,
+        report: AnalysisReport,
+        user_query: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> MemoryEvent:
         profile = self.load_profile()
         event = MemoryEvent(
             event_type="analysis_report",
@@ -138,10 +146,51 @@ class LocalMemoryStore:
                 "model_name": model_name,
                 "profile_version": profile.version,
                 "report": report.to_dict(),
+                "metadata": dict(metadata or {}),
             },
         )
         self._append_jsonl(self.analysis_path, event.to_dict())
         return event
+
+    def save_opportunity_pool(self, pool: dict[str, Any]) -> MemoryEvent:
+        """Persist the latest pool atomically and append an immutable replay event."""
+        if not isinstance(pool.get("id"), str) or not isinstance(pool.get("analysis_date"), str):
+            raise ValueError("Opportunity pool requires id and analysis_date")
+        self._write_json_atomic(self.opportunity_pool_path, pool)
+        event = MemoryEvent(
+            event_type="opportunity_pool_run",
+            analysis_date=pool["analysis_date"],
+            payload={"pool": pool},
+        )
+        self._append_jsonl(self.opportunity_event_path, event.to_dict())
+        return event
+
+    def load_opportunity_pool(self) -> dict[str, Any] | None:
+        self.ensure()
+        if not self.opportunity_pool_path.exists():
+            return None
+        data = json.loads(self.opportunity_pool_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("Opportunity pool storage is invalid")
+        return data
+
+    def recent_opportunity_runs(self, limit: int = 5) -> list[dict[str, Any]]:
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        return self._read_jsonl(self.opportunity_event_path)[-limit:]
+
+    def replay_opportunity_run(self, event_id: str) -> dict[str, Any]:
+        event = next(
+            (item for item in self._read_jsonl(self.opportunity_event_path) if item.get("id") == event_id),
+            None,
+        )
+        if event is None:
+            raise ValueError(f"Unknown opportunity-pool run: {event_id}")
+        return {
+            "opportunity_event": event,
+            "pool_snapshot": event.get("payload", {}).get("pool", {}),
+            "guardrail": "Opportunity scores are evidence/strategy-fit observations, not win rates or return forecasts.",
+        }
 
     def save_interaction_summary(
         self,
@@ -314,18 +363,25 @@ class LocalMemoryStore:
 
     def export_bundle(self, destination: str | Path | None = None) -> dict[str, Any]:
         """Return or write a self-contained portable profile and append-only history."""
+        event_groups = {
+            "analysis": self._read_jsonl(self.analysis_path),
+            "feedback": self._read_jsonl(self.feedback_path),
+            "interaction": self._read_jsonl(self.interaction_path),
+        }
+        opportunity_events = self._read_jsonl(self.opportunity_event_path)
+        if opportunity_events:
+            event_groups["opportunity"] = opportunity_events
         bundle = {
             "format": "trading-agents-china-memory",
             "version": 1,
             "trading_profile": self.load_profile().to_dict(),
-            "events": {
-                "analysis": self._read_jsonl(self.analysis_path),
-                "feedback": self._read_jsonl(self.feedback_path),
-                "interaction": self._read_jsonl(self.interaction_path),
-            },
+            "events": event_groups,
             "watchlist": self.load_watchlist(),
             "portfolio": self.load_portfolio(),
         }
+        opportunity_pool = self.load_opportunity_pool()
+        if opportunity_pool is not None:
+            bundle["opportunity_pool"] = opportunity_pool
         if destination is not None:
             path = Path(destination)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +411,8 @@ class LocalMemoryStore:
             "feedback": self._merge_event_rows(self.feedback_path, events.get("feedback", [])),
             "interaction": self._merge_event_rows(self.interaction_path, events.get("interaction", [])),
         }
+        if "opportunity" in events:
+            counts["opportunity"] = self._merge_event_rows(self.opportunity_event_path, events["opportunity"])
         watchlist = data.get("watchlist")
         if watchlist is not None:
             if not isinstance(watchlist, list):
@@ -368,6 +426,11 @@ class LocalMemoryStore:
             if not isinstance(portfolio, dict):
                 raise ValueError("Memory bundle portfolio must be an object")
             self._write_json(self.portfolio_path, portfolio)
+        opportunity_pool = data.get("opportunity_pool")
+        if opportunity_pool is not None:
+            if not isinstance(opportunity_pool, dict):
+                raise ValueError("Memory bundle opportunity_pool must be an object")
+            self._write_json_atomic(self.opportunity_pool_path, opportunity_pool)
         return counts
 
     def save_external_analysis(
@@ -401,6 +464,12 @@ class LocalMemoryStore:
     def _write_json(self, path: Path, data: Any) -> None:
         self.ensure()
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_json_atomic(self, path: Path, data: Any) -> None:
+        self.ensure()
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():

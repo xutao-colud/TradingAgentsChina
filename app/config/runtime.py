@@ -46,9 +46,15 @@ def _validate(data: object) -> None:
     if not isinstance(data, dict):
         raise RuntimeError("TradingOS configuration must be a JSON object")
     required_paths = [
-        ("rule_version",), ("runtime", "network_timeout_seconds"), ("runtime", "llm_network_timeout_seconds"),
+        ("rule_version",), ("runtime", "network_timeout_seconds"), ("runtime", "network_retry"), ("runtime", "llm_network_timeout_seconds"),
         ("runtime", "llm_request", "temperature"), ("runtime", "llm_request", "max_tokens"),
         ("runtime", "snapshot_max_workers"),
+        ("opportunity_pipeline", "source_priority"),
+        ("opportunity_pipeline", "level1"),
+        ("opportunity_pipeline", "level2"),
+        ("opportunity_pipeline", "level3"),
+        ("opportunity_pipeline", "ranking"),
+        ("opportunity_pipeline", "lifecycle"),
         ("providers", "eastmoney", "kline_url"), ("providers", "eastmoney", "headers"),
         ("providers", "sina", "quote_url"), ("providers", "sina", "headers"),
         ("providers", "tushare", "token_env"), ("providers", "tushare", "interfaces"),
@@ -62,14 +68,19 @@ def _validate(data: object) -> None:
         ("providers", "tushare", "ah_premium"),
         ("providers", "akshare", "functions"), ("providers", "akshare", "capabilities"),
         ("providers", "akshare", "announcement_markets"),
+        ("providers", "akshare", "market_context"),
+        ("providers", "akshare", "bulk_snapshot_cache"),
         ("providers", "event_sentiment"),
         ("data_quality", "raw_snapshots"), ("data_quality", "issue_messages"),
         ("data_quality", "datasets", "daily_prices"),
         ("data_quality", "datasets", "dragon_tiger"),
         ("data_quality", "datasets", "dragon_tiger_history"),
         ("data_quality", "datasets", "announcements"),
+        ("data_quality", "datasets", "holder_trades"),
+        ("data_quality", "datasets", "pledge_risk"),
         ("data_quality", "datasets", "margin_financing"),
         ("data_quality", "datasets", "market_sentiment"),
+        ("data_quality", "datasets", "market_breadth_current"),
         ("data_quality", "datasets", "ah_premium"),
         ("data_quality", "datasets", "fundamental_peers"),
         ("data_quality", "datasets", "industry_flow"),
@@ -81,6 +92,19 @@ def _validate(data: object) -> None:
         ("scoring", "score_bounds", "max"), ("scoring", "data_readiness", "minimum_daily_bars"),
         ("scoring", "theme"),
         ("scoring", "committee_signals"),
+        ("scoring", "stage_thresholds"),
+        ("scoring", "market_temperature"),
+        ("scoring", "money_making_effect"),
+        ("scoring", "main_force_behavior"),
+        ("scoring", "market_strategy_gate"),
+        ("scoring", "profile_alignment"),
+        ("scoring", "stock_score_model"),
+        ("scoring", "evidence_chain"),
+        ("scoring", "playbook_evaluator"),
+        ("scoring", "committee_routing"),
+        ("scoring", "research_cases"),
+        ("scoring", "risk_manager"),
+        ("scoring", "portfolio_manager"),
         ("market_rules", "default_exchange"), ("market_rules", "symbol_exchange_prefixes"),
         ("market_rules", "convertible_bond_exchange_prefixes"),
         ("market_rules", "board_prefixes"), ("market_rules", "daily_limit_pct"),
@@ -95,6 +119,7 @@ def _validate(data: object) -> None:
         ("domain_knowledge", "dragon_tiger_depth"),
         ("domain_knowledge", "announcement_timeliness"),
         ("domain_knowledge", "industry_prosperity"),
+        ("domain_knowledge", "risk_scanner"),
         ("backtest", "playbook_rules", "trend_core"),
         ("backtest", "playbook_rules", "hot_money_leader"),
         ("backtest", "playbook_rules", "institutional_growth"),
@@ -108,6 +133,61 @@ def _validate(data: object) -> None:
         raise RuntimeError(f"Invalid TradingOS configuration: {exc}") from exc
     if settings.get("scoring", "score_bounds", "min") >= settings.get("scoring", "score_bounds", "max"):
         raise RuntimeError("score_bounds.min must be below score_bounds.max")
+    retry = settings.get("runtime", "network_retry")
+    if retry["max_attempts"] < 1 or retry["initial_backoff_seconds"] < 0 or retry["max_backoff_seconds"] < retry["initial_backoff_seconds"]:
+        raise RuntimeError("runtime.network_retry must use bounded positive attempts and backoff")
+    score_min = settings.get("scoring", "score_bounds", "min")
+    score_max = settings.get("scoring", "score_bounds", "max")
+    opportunity = settings.get("opportunity_pipeline")
+    l1 = opportunity["level1"]
+    component_weights = l1["component_weights"]
+    required_components = {
+        "source_priority", "data_coverage", "liquidity", "capital_flow",
+        "price_behavior", "profile_fit",
+    }
+    if required_components != set(component_weights) or abs(sum(component_weights.values()) - 1.0) > 1e-9:
+        raise RuntimeError("opportunity_pipeline.level1 component weights must be complete and sum to one")
+    if not 0 <= l1["minimum_data_coverage"] <= 1:
+        raise RuntimeError("opportunity pipeline data coverage must be between zero and one")
+    if not 0 < opportunity["level3"]["maximum_candidates"] <= opportunity["level2"]["maximum_candidates"] <= l1["maximum_candidates"] <= l1["maximum_universe"]:
+        raise RuntimeError("opportunity pipeline candidate limits must satisfy L3 <= L2 <= L1 <= universe")
+    if set(opportunity["source_priority"]) != {"position", "watchlist", "explicit", "radar"}:
+        raise RuntimeError("opportunity pipeline source priorities are incomplete")
+    if any(value < 0 for value in opportunity["source_priority"].values()):
+        raise RuntimeError("opportunity pipeline source priorities cannot be negative")
+    if any(l1[key] <= 0 for key in ("liquidity_full_amount", "capital_flow_ratio_full_pct", "price_change_preferred_abs_pct", "price_change_max_abs_pct")):
+        raise RuntimeError("opportunity pipeline L1 scales must be positive")
+    if l1["price_change_max_abs_pct"] <= l1["price_change_preferred_abs_pct"]:
+        raise RuntimeError("opportunity pipeline maximum price change must exceed preferred change")
+    if not l1["required_snapshot_fields"]:
+        raise RuntimeError("opportunity pipeline requires at least one L1 snapshot field")
+    level2 = opportunity["level2"]
+    if level2["provider_fallback_price_bars"] < 2 or any(value < 1 for value in level2["summary_limits"].values()):
+        raise RuntimeError("opportunity pipeline L2 fallback and summary limits must be positive")
+    if not opportunity["market_blocking_statuses"]:
+        raise RuntimeError("opportunity pipeline must configure market blocking statuses")
+    if not opportunity["degraded_data_statuses"]:
+        raise RuntimeError("opportunity pipeline must configure degraded data statuses")
+    if not opportunity["admitted_radar_statuses"]:
+        raise RuntimeError("opportunity pipeline must configure admitted radar statuses")
+    ranking = opportunity["ranking"]
+    if abs(sum(ranking.values()) - 1.0) > 1e-9:
+        raise RuntimeError("opportunity pipeline ranking weights must sum to one")
+    lifecycle = opportunity["lifecycle"]
+    if not lifecycle["climax_score"] > lifecycle["accelerate_score"] > lifecycle["start_score"] > lifecycle["eliminate_score"]:
+        raise RuntimeError("opportunity lifecycle thresholds are out of order")
+    stage_thresholds = settings.get("scoring", "stage_thresholds")
+    if not stage_thresholds["hot"] > stage_thresholds["high"] > stage_thresholds["mid"]:
+        raise RuntimeError("stage_thresholds must satisfy hot > high > mid")
+    stock_score = settings.get("scoring", "stock_score_model")
+    if abs(float(stock_score["agent_weight"]) + float(stock_score["skill_weight"]) - 1.0) > 1e-9:
+        raise RuntimeError("stock_score_model weights must sum to one")
+    routing = settings.get("scoring", "committee_routing")
+    required_factions = {"aggressive", "trend", "growth", "value", "policy", "reversal", "defensive"}
+    if required_factions - set(routing["factions"]):
+        raise RuntimeError("committee_routing faction configuration is incomplete")
+    if routing["scaled_divisor"] <= 0 or routing["invalid_penalty_each"] < 0:
+        raise RuntimeError("committee_routing divisors and penalties are invalid")
     if settings.get("scoring", "data_readiness", "minimum_daily_bars") < 2:
         raise RuntimeError("data_readiness.minimum_daily_bars must be at least 2")
     technical = settings.get("domain_knowledge", "technical")
@@ -136,6 +216,8 @@ def _validate(data: object) -> None:
         raise RuntimeError("technical.return_windows must include scoring.technical.ma_long")
     if settings.get("data_quality", "raw_snapshots", "max_records_per_snapshot") < 1:
         raise RuntimeError("raw_snapshots.max_records_per_snapshot must be positive")
+    if settings.get("providers", "akshare", "bulk_snapshot_cache", "maximum_age_minutes") <= 0:
+        raise RuntimeError("akshare bulk snapshot cache age must be positive")
     market_context = settings.get("providers", "tushare", "market_context")
     if market_context["history_points"] < settings.get("domain_knowledge", "sentiment", "minimum_history_points"):
         raise RuntimeError("tushare.market_context.history_points cannot be below sentiment.minimum_history_points")
@@ -260,10 +342,37 @@ def _validate(data: object) -> None:
             or not relation.get("as_of")
         ):
             raise RuntimeError("industry chain relations require target, stage, industry, source_id, and as_of")
-    for interface in ("stock_basic", "fina_indicator", "fina_indicator_vip", "industry_moneyflow", "ah_comparison", "northbound_market_flow"):
+    risk = settings.get("domain_knowledge", "risk_scanner")
+    score_min = settings.get("scoring", "score_bounds", "min")
+    score_max = settings.get("scoring", "score_bounds", "max")
+    if not score_min <= risk["base_score"] <= score_max:
+        raise RuntimeError("risk_scanner.base_score must stay inside score bounds")
+    if any(risk[key] < 1 for key in ("holder_reduction_lookback_days", "inquiry_lookback_days", "liquidity_window_days", "minimum_liquidity_observations")):
+        raise RuntimeError("risk scanner lookbacks and observation requirements must be positive")
+    if risk["minimum_liquidity_observations"] > risk["liquidity_window_days"]:
+        raise RuntimeError("risk scanner liquidity observations cannot exceed its window")
+    if not risk["liquidity_condition_markers"]:
+        raise RuntimeError("risk scanner liquidity condition markers cannot be empty")
+    required_thresholds = {
+        "minimum_profit_growth_yoy", "maximum_debt_to_asset_pct", "maximum_pe_ttm",
+        "minimum_cashflow_quality", "maximum_goodwill_ratio_pct", "maximum_pledge_ratio_pct",
+    }
+    if required_thresholds - set(risk["thresholds"]):
+        raise RuntimeError("risk scanner thresholds are incomplete")
+    required_deductions = {
+        "st", "suspended", "profit_decline", "high_debt", "high_valuation", "weak_cashflow",
+        "major_shareholder_reduction", "inquiry_each", "inquiry_maximum", "high_goodwill",
+        "high_pledge", "low_average_amount", "low_average_turnover", "invalid_condition",
+    }
+    if required_deductions - set(risk["deductions"]) or any(value < 0 for value in risk["deductions"].values()):
+        raise RuntimeError("risk scanner deductions are incomplete or negative")
+    grades = risk["grade_thresholds"]
+    if set(grades) != {"A", "B", "C"} or not grades["A"] > grades["B"] > grades["C"] >= score_min:
+        raise RuntimeError("risk scanner grade thresholds must satisfy A > B > C >= score minimum")
+    for interface in ("stock_basic", "fina_indicator", "fina_indicator_vip", "pledge_stat", "industry_moneyflow", "ah_comparison", "northbound_market_flow"):
         if interface not in settings.get("providers", "tushare", "interfaces"):
             raise RuntimeError(f"tushare.interfaces misses: {interface}")
-    for dataset in ("daily_prices", "dragon_tiger", "dragon_tiger_history", "announcements", "margin_financing", "market_sentiment", "ah_premium", "fundamental_peers", "industry_flow", "industry_valuation", "northbound_holding", "northbound_market_flow", "capital_flow_history"):
+    for dataset in ("daily_prices", "dragon_tiger", "dragon_tiger_history", "announcements", "holder_trades", "pledge_risk", "margin_financing", "market_sentiment", "ah_premium", "fundamental_peers", "industry_flow", "industry_valuation", "northbound_holding", "northbound_market_flow", "capital_flow_history"):
         rules = settings.get("data_quality", "datasets", dataset)
         required_rule_keys = {
             "required_fields",

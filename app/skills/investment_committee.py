@@ -74,14 +74,15 @@ def assess_investment_faction_committee(
     layer of analysis.
     """
 
+    routing = _committee_routing_config()
     data_readiness = next((item for item in skill_insights if item.category == "data_quality"), None)
-    if data_readiness and data_readiness.score < 70:
+    if data_readiness and data_readiness.score < routing["readiness_threshold"]:
         topic = _normalize_topic(user_question)
         return SkillInsight(
             skill="投资流派委员会",
             category="committee",
             stage="证据不足",
-            score=0,
+            score=routing["insufficient_score"],
             conclusion="委员会拒绝裁决：市场和个股输入未通过数据就绪性审查。",
             strategy="先补齐真实、同日期的关键来源；在此之前不选择领先流派或战法。",
             evidence=[f"研讨问题：{topic}", f"数据状态：{data_readiness.stage}", *data_readiness.evidence[:4]],
@@ -93,6 +94,17 @@ def assess_investment_faction_committee(
                 "factions": [],
                 "cross_examination": [],
                 "risk_challenge": {"role": "risk_challenge", "verdict": "关键数据不充分，禁止路线比较。"},
+                # A refusal is still a valid court result.  Keep the readiness
+                # evidence in the same contract as a normal hearing so clients
+                # can explain *why* no faction comparison was produced instead
+                # of treating the committee response as missing data.
+                "data_readiness": {
+                    "stage": data_readiness.stage,
+                    "score": data_readiness.score,
+                    "evidence": list(data_readiness.evidence),
+                    "risks": list(data_readiness.risks),
+                    "details": dict(data_readiness.details),
+                },
             },
         )
 
@@ -129,10 +141,10 @@ def assess_investment_faction_committee(
     winner = factions[0]
     runner_up = factions[1]
     score_gap = winner.score - runner_up.score
-    if winner.score >= 72 and score_gap >= 6:
+    if winner.score >= routing["clear_winner_score"] and score_gap >= routing["clear_winner_gap"]:
         stage = winner.name
         conclusion = f"当前证据对{winner.name}的适配度明显领先。"
-    elif winner.score >= 62:
+    elif winner.score >= routing["leading_score"]:
         stage = f"{winner.name}/分歧"
         conclusion = f"{winner.name}暂时领先，但与{runner_up.name}分歧不大。"
     else:
@@ -149,7 +161,7 @@ def assess_investment_faction_committee(
     if invalid_conditions:
         evidence.append(f"规则约束：{len(invalid_conditions)} 项否决/降级条件")
     risks = [
-        "该分数是基于当前样例证据的路线选择信号，不代表战法因果有效或未来收益承诺。",
+        "该分数是基于当前已接纳证据的路线选择信号，不代表战法因果有效或未来收益承诺。",
         "真实 SaaS 版本必须按市场阶段、持有期、交易成本和样本外结果继续验证。",
     ]
     risks.extend(winner.risks[:3])
@@ -164,7 +176,7 @@ def assess_investment_faction_committee(
             "discussion_topic": topic,
             "score_gap": score_gap,
             "reliability": _reliability_label(winner.score, score_gap),
-            "score_method": "分数 = 流派基础分 + 市场/技术/资金/题材/风险/规则约束加减分，最终限制在 0-100。",
+            "score_method": _committee_score_method(),
             "score_summary": f"{winner.name} {winner.score} 分，{runner_up.name} {runner_up.score} 分，领先 {score_gap} 分。",
             "score_warning": "分数只代表当前证据对流派路线的适配度，不代表收益概率、胜率或买卖承诺。",
             "verdict": conclusion,
@@ -209,8 +221,9 @@ class _Context:
     evidence_sources: list[EvidenceSource]
     quality_reports: list[DataQualityReport]
 
-    def agent(self, name: str, default: int = 50) -> int:
-        return self.agent_scores.get(name, default)
+    def agent(self, name: str, default: int | None = None) -> int:
+        neutral = int(_committee_routing_config()["default_agent_score"])
+        return self.agent_scores.get(name, neutral if default is None else default)
 
     def agent_detail(self, name: str) -> dict[str, object]:
         return self.agent_details.get(name, {})
@@ -275,7 +288,7 @@ class _Context:
     @property
     def risk_score(self) -> int:
         risk = self.skill("A股风险扫描器")
-        return risk.score if risk else 60
+        return risk.score if risk else int(_committee_routing_config()["default_risk_score"])
 
     @property
     def sentiment_stage(self) -> str:
@@ -295,7 +308,7 @@ class _Context:
     @property
     def money_making_score(self) -> int:
         money_making = self.skill("赚钱效应分析")
-        return money_making.score if money_making else 50
+        return money_making.score if money_making else int(_committee_routing_config()["default_money_making_score"])
 
     @property
     def main_force_stage(self) -> str:
@@ -304,7 +317,8 @@ class _Context:
 
     @property
     def invalid_penalty(self) -> int:
-        return min(35, len(self.invalid_conditions) * 12)
+        config = _committee_routing_config()
+        return min(int(config["invalid_penalty_cap"]), len(self.invalid_conditions) * int(config["invalid_penalty_each"]))
 
 
 def _dragon_tiger_signal(context: _Context) -> _CommitteeSignal:
@@ -597,6 +611,10 @@ def _committee_signal_config() -> dict[str, object]:
     return load_runtime_settings().get("scoring", "committee_signals")
 
 
+def _committee_routing_config() -> dict[str, object]:
+    return load_runtime_settings().get("scoring", "committee_routing")
+
+
 def _dates_match(analysis_date: str | None, observed_dates: list[str]) -> bool:
     return bool(analysis_date and observed_dates) and all(value.startswith(analysis_date) for value in observed_dates)
 
@@ -793,22 +811,23 @@ def _append_industry_prosperity_adjustment(
 
 
 def _aggressive_hot_money(context: _Context) -> FactionView:
-    base = 30
+    route_config = _committee_routing_config()["factions"]["aggressive"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale: list[str] = []
     risks: list[str] = []
     if context.sentiment_stage == "发酵":
-        adjustments.append(_score_adjustment("情绪周期", 18, "发酵期更适合游资接力，市场承接通常更强。"))
+        adjustments.append(_score_adjustment("情绪周期", route_config["sentiment_fermentation"], "发酵期更适合游资接力，市场承接通常更强。"))
         rationale.append("情绪进入发酵期")
     elif context.sentiment_stage == "启动":
-        adjustments.append(_score_adjustment("情绪周期", 8, "启动期有试错窗口，但接力确定性还未充分展开。"))
+        adjustments.append(_score_adjustment("情绪周期", route_config["sentiment_start"], "启动期有试错窗口，但接力确定性还未充分展开。"))
         rationale.append(f"情绪处于{context.sentiment_stage}")
     else:
-        adjustments.append(_score_adjustment("情绪周期", -18, f"情绪处于{context.sentiment_stage}，高位接力容错下降。"))
+        adjustments.append(_score_adjustment("情绪周期", route_config["sentiment_other"], f"情绪处于{context.sentiment_stage}，高位接力容错下降。"))
         risks.append(f"情绪处于{context.sentiment_stage}，接力容错下降")
-    money_making_adj = _scaled(context.money_making_score, 60, 12)
-    capital_adj = _scaled(context.agent("资金流 Agent"), 65, 10)
-    theme_adj = _scaled(context.agent("题材热点 Agent"), 60, 6)
+    money_making_adj = _scaled(context.money_making_score, route_config["money_threshold"], route_config["money_weight"])
+    capital_adj = _scaled(context.agent("资金流 Agent"), route_config["capital_threshold"], route_config["capital_weight"])
+    theme_adj = _scaled(context.agent("题材热点 Agent"), route_config["theme_threshold"], route_config["theme_weight"])
     adjustments.append(_score_adjustment("赚钱效应", money_making_adj, f"赚钱效应 {context.money_making_score} 分，决定短线资金是否愿意继续进攻。"))
     adjustments.append(_score_adjustment("资金流", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，游资派要求资金连续。"))
     adjustments.append(_score_adjustment("题材强度", theme_adj, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，题材越强接力越有共识。"))
@@ -885,10 +904,10 @@ def _aggressive_hot_money(context: _Context) -> FactionView:
     else:
         _append_signal_gap(risks, intraday, "盘口")
     if context.theme_stage in {"启动", "扩散"}:
-        adjustments.append(_score_adjustment("题材阶段", 6, f"题材处于{context.theme_stage}，仍有扩散空间。"))
+        adjustments.append(_score_adjustment("题材阶段", route_config["theme_stage_bonus"], f"题材处于{context.theme_stage}，仍有扩散空间。"))
         rationale.append(f"题材处于{context.theme_stage}")
-    if context.risk_score < 65:
-        adjustments.append(_score_adjustment("风险底线", -25, f"风险扫描 {context.risk_score} 分，未达到激进交易底线。"))
+    if context.risk_score < route_config["risk_threshold"]:
+        adjustments.append(_score_adjustment("风险底线", -route_config["risk_penalty"], f"风险扫描 {context.risk_score} 分，未达到激进交易底线。"))
         risks.append("风险扫描未达到激进交易底线")
     if context.invalid_penalty:
         adjustments.append(_score_adjustment("规则约束", -context.invalid_penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件。"))
@@ -897,16 +916,17 @@ def _aggressive_hot_money(context: _Context) -> FactionView:
 
 
 def _trend_capacity(context: _Context) -> FactionView:
-    base = 42
+    route_config = _committee_routing_config()["factions"]["trend"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale = [
         f"技术面 {context.agent('技术分析 Agent')} 分",
         f"资金面 {context.agent('资金流 Agent')} 分",
     ]
     risks: list[str] = []
-    technical_adj = _scaled(context.agent("技术分析 Agent"), 55, 24)
-    capital_adj = _scaled(context.agent("资金流 Agent"), 55, 18)
-    risk_adj = _scaled(context.risk_score, 60, 12)
+    technical_adj = _scaled(context.agent("技术分析 Agent"), route_config["technical_threshold"], route_config["technical_weight"])
+    capital_adj = _scaled(context.agent("资金流 Agent"), route_config["capital_threshold"], route_config["capital_weight"])
+    risk_adj = _scaled(context.risk_score, route_config["risk_threshold"], route_config["risk_weight"])
     adjustments.append(_score_adjustment("技术趋势", technical_adj, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，趋势派最看重趋势确认。"))
     adjustments.append(_score_adjustment("资金承接", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，决定趋势能否延续。"))
     adjustments.append(_score_adjustment("风险质量", risk_adj, f"风险扫描 {context.risk_score} 分，风险越低越能承载趋势仓位。"))
@@ -940,10 +960,10 @@ def _trend_capacity(context: _Context) -> FactionView:
     else:
         _append_signal_gap(risks, intraday, "盘口")
     if context.theme_stage in {"启动", "扩散"}:
-        adjustments.append(_score_adjustment("题材阶段", 9, f"题材处于{context.theme_stage}，对趋势延续有加成。"))
+        adjustments.append(_score_adjustment("题材阶段", route_config["theme_stage_bonus"], f"题材处于{context.theme_stage}，对趋势延续有加成。"))
         rationale.append(f"题材处于{context.theme_stage}")
     if context.sentiment_stage in {"高潮", "退潮", "冰点"}:
-        adjustments.append(_score_adjustment("情绪约束", -12, f"情绪处于{context.sentiment_stage}，趋势买点需要降低追价。"))
+        adjustments.append(_score_adjustment("情绪约束", -route_config["sentiment_penalty"], f"情绪处于{context.sentiment_stage}，趋势买点需要降低追价。"))
         risks.append(f"情绪处于{context.sentiment_stage}，趋势买点要降低追价")
     if context.invalid_penalty:
         adjustments.append(_score_adjustment("规则约束", -context.invalid_penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件。"))
@@ -951,16 +971,17 @@ def _trend_capacity(context: _Context) -> FactionView:
 
 
 def _institutional_growth(context: _Context) -> FactionView:
-    base = 40
+    route_config = _committee_routing_config()["factions"]["growth"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale = [
         f"基本面 {context.agent('基本面 Agent')} 分",
         f"风险扫描 {context.risk_score} 分",
     ]
     risks: list[str] = []
-    fundamental_adj = _scaled(context.agent("基本面 Agent"), 60, 26)
-    risk_adj = _scaled(context.risk_score, 65, 18)
-    technical_adj = _scaled(context.agent("技术分析 Agent"), 55, 10)
+    fundamental_adj = _scaled(context.agent("基本面 Agent"), route_config["fundamental_threshold"], route_config["fundamental_weight"])
+    risk_adj = _scaled(context.risk_score, route_config["risk_threshold"], route_config["risk_weight"])
+    technical_adj = _scaled(context.agent("技术分析 Agent"), route_config["technical_threshold"], route_config["technical_weight"])
     adjustments.append(_score_adjustment("基本面质量", fundamental_adj, f"基本面 Agent {context.agent('基本面 Agent')} 分，成长派要求盈利和预期证据。"))
     adjustments.append(_score_adjustment("风险过滤", risk_adj, f"风险扫描 {context.risk_score} 分，机构成长不接受明显硬风险。"))
     adjustments.append(_score_adjustment("趋势配合", technical_adj, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，用于判断资金是否认可成长逻辑。"))
@@ -1005,26 +1026,27 @@ def _institutional_growth(context: _Context) -> FactionView:
     else:
         _append_signal_gap(risks, tiered, "资金流分档")
     if context.theme_stage == "高潮":
-        adjustments.append(_score_adjustment("题材拥挤", -8, "题材高潮会放大估值兑现风险。"))
+        adjustments.append(_score_adjustment("题材拥挤", -route_config["theme_penalty"], "题材高潮会放大估值兑现风险。"))
         risks.append("题材高潮会放大估值兑现风险")
-    if context.agent("基本面 Agent") < 65:
+    if context.agent("基本面 Agent") < route_config["fundamental_minimum"]:
         risks.append("盈利质量或预期证据不足")
     if context.invalid_penalty:
-        penalty = min(18, context.invalid_penalty)
+        penalty = min(route_config["invalid_penalty_cap"], context.invalid_penalty)
         adjustments.append(_score_adjustment("规则约束", -penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，成长派部分降权。"))
     return _finalize_faction("机构成长派", "景气成长/预期修正", base, adjustments, rationale, risks)
 
 
 def _value_dividend(context: _Context) -> FactionView:
-    base = 42
+    route_config = _committee_routing_config()["factions"]["value"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale = [
         f"基本面 {context.agent('基本面 Agent')} 分",
         f"风控质量 {context.risk_score} 分",
     ]
     risks: list[str] = []
-    fundamental_adj = _scaled(context.agent("基本面 Agent"), 62, 24)
-    risk_adj = _scaled(context.risk_score, 70, 20)
+    fundamental_adj = _scaled(context.agent("基本面 Agent"), route_config["fundamental_threshold"], route_config["fundamental_weight"])
+    risk_adj = _scaled(context.risk_score, route_config["risk_threshold"], route_config["risk_weight"])
     adjustments.append(_score_adjustment("基本面安全垫", fundamental_adj, f"基本面 Agent {context.agent('基本面 Agent')} 分，价值派要求利润和现金流能支撑估值。"))
     adjustments.append(_score_adjustment("风控质量", risk_adj, f"风险扫描 {context.risk_score} 分，风险越低越符合价值持有。"))
     _append_industry_prosperity_adjustment(
@@ -1043,29 +1065,30 @@ def _value_dividend(context: _Context) -> FactionView:
         rationale.append(northbound.observed)
     else:
         _append_signal_gap(risks, northbound, "北向持股")
-    if context.agent("技术分析 Agent") < 45:
-        adjustments.append(_score_adjustment("趋势陷阱", -10, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，趋势过弱需防价值陷阱。"))
+    if context.agent("技术分析 Agent") < route_config["technical_minimum"]:
+        adjustments.append(_score_adjustment("趋势陷阱", -route_config["technical_penalty"], f"技术分析 Agent {context.agent('技术分析 Agent')} 分，趋势过弱需防价值陷阱。"))
         risks.append("趋势过弱，需防范价值陷阱")
-    if context.agent("题材热点 Agent") >= 60:
-        adjustments.append(_score_adjustment("市场关注", 5, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，价值/红利线有一定关注。"))
+    if context.agent("题材热点 Agent") >= route_config["theme_minimum"]:
+        adjustments.append(_score_adjustment("市场关注", route_config["theme_bonus"], f"题材热点 Agent {context.agent('题材热点 Agent')} 分，价值/红利线有一定关注。"))
         rationale.append("价值/红利主题有一定市场关注")
     if context.invalid_penalty:
-        penalty = min(18, context.invalid_penalty)
+        penalty = min(route_config["invalid_penalty_cap"], context.invalid_penalty)
         adjustments.append(_score_adjustment("规则约束", -penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，价值派部分降权。"))
     return _finalize_faction("价值红利派", "现金流/估值约束", base, adjustments, rationale, risks)
 
 
 def _policy_cycle(context: _Context) -> FactionView:
-    base = 39
+    route_config = _committee_routing_config()["factions"]["policy"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale = [
         f"题材热点 {context.agent('题材热点 Agent')} 分",
         f"市场温度 {context.market_temperature} 分",
     ]
     risks: list[str] = []
-    theme_adj = _scaled(context.agent("题材热点 Agent"), 55, 24)
-    market_adj = _scaled(context.market_temperature, 55, 14)
-    capital_adj = _scaled(context.agent("资金流 Agent"), 50, 10)
+    theme_adj = _scaled(context.agent("题材热点 Agent"), route_config["theme_threshold"], route_config["theme_weight"])
+    market_adj = _scaled(context.market_temperature, route_config["market_threshold"], route_config["market_weight"])
+    capital_adj = _scaled(context.agent("资金流 Agent"), route_config["capital_threshold"], route_config["capital_weight"])
     adjustments.append(_score_adjustment("政策/题材强度", theme_adj, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，政策派看主线共识。"))
     adjustments.append(_score_adjustment("市场温度", market_adj, f"市场温度 {context.market_temperature} 分，决定政策线能否扩散。"))
     adjustments.append(_score_adjustment("资金扩散", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，用于验证政策线是否有真实资金承接。"))
@@ -1077,45 +1100,46 @@ def _policy_cycle(context: _Context) -> FactionView:
         "产业链节点资金传导用于质证政策主题是否扩散到真实行业环节。",
     )
     if context.sentiment_stage == "退潮":
-        adjustments.append(_score_adjustment("情绪退潮", -12, "退潮期政策线也容易高开低走。"))
+        adjustments.append(_score_adjustment("情绪退潮", -route_config["retreat_penalty"], "退潮期政策线也容易高开低走。"))
         risks.append("退潮期政策线也容易高开低走")
-    if context.risk_score < 60:
-        adjustments.append(_score_adjustment("个股风险", -12, f"风险扫描 {context.risk_score} 分，个股风险会削弱政策贝塔。"))
+    if context.risk_score < route_config["risk_threshold"]:
+        adjustments.append(_score_adjustment("个股风险", -route_config["risk_penalty"], f"风险扫描 {context.risk_score} 分，个股风险会削弱政策贝塔。"))
         risks.append("个股风险会削弱政策贝塔")
     if context.invalid_penalty:
-        penalty = min(22, context.invalid_penalty)
+        penalty = min(route_config["invalid_penalty_cap"], context.invalid_penalty)
         adjustments.append(_score_adjustment("规则约束", -penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，政策派降权。"))
     return _finalize_faction("政策周期派", "产业政策/板块轮动", base, adjustments, rationale, risks)
 
 
 def _reversal_low_absorption(context: _Context) -> FactionView:
-    base = 36
+    route_config = _committee_routing_config()["factions"]["reversal"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale: list[str] = []
     risks: list[str] = []
     if context.sentiment_stage in {"冰点", "退潮"}:
-        adjustments.append(_score_adjustment("情绪位置", 18, f"情绪处于{context.sentiment_stage}，具备修复观察价值。"))
+        adjustments.append(_score_adjustment("情绪位置", route_config["cold_sentiment_bonus"], f"情绪处于{context.sentiment_stage}，具备修复观察价值。"))
         rationale.append(f"情绪处于{context.sentiment_stage}，具备反转观察价值")
     elif context.sentiment_stage == "启动":
-        adjustments.append(_score_adjustment("情绪位置", 8, "情绪刚启动，可观察分歧后的低吸确认。"))
+        adjustments.append(_score_adjustment("情绪位置", route_config["start_bonus"], "情绪刚启动，可观察分歧后的低吸确认。"))
         rationale.append("情绪刚启动，可观察低吸确认")
     else:
-        adjustments.append(_score_adjustment("情绪位置", -8, f"情绪处于{context.sentiment_stage}，低吸性价比不突出。"))
+        adjustments.append(_score_adjustment("情绪位置", -route_config["other_penalty"], f"情绪处于{context.sentiment_stage}，低吸性价比不突出。"))
         risks.append(f"情绪处于{context.sentiment_stage}，低吸性价比不突出")
     technical = context.agent("技术分析 Agent")
-    if 45 <= technical <= 68:
-        adjustments.append(_score_adjustment("技术位置", 16, f"技术分析 Agent {technical} 分，未过热，适合等待确认。"))
+    if route_config["technical_minimum"] <= technical <= route_config["technical_maximum"]:
+        adjustments.append(_score_adjustment("技术位置", route_config["technical_bonus"], f"技术分析 Agent {technical} 分，未过热，适合等待确认。"))
         rationale.append("技术未过热，适合等待确认")
-    elif technical > 75:
-        adjustments.append(_score_adjustment("技术过热", -8, f"技术分析 Agent {technical} 分，已不属于低吸反转场景。"))
+    elif technical > route_config["overheat_threshold"]:
+        adjustments.append(_score_adjustment("技术过热", -route_config["overheat_penalty"], f"技术分析 Agent {technical} 分，已不属于低吸反转场景。"))
         risks.append("技术过热，不属于低吸反转场景")
     else:
-        adjustments.append(_score_adjustment("趋势破坏", -10, f"技术分析 Agent {technical} 分，趋势破坏过深，容易抄底过早。"))
+        adjustments.append(_score_adjustment("趋势破坏", -route_config["broken_trend_penalty"], f"技术分析 Agent {technical} 分，趋势破坏过深，容易抄底过早。"))
         risks.append("趋势破坏过深，容易抄底过早")
     if "派发" in context.main_force_stage:
-        adjustments.append(_score_adjustment("主力行为", -16, f"主力行为偏{context.main_force_stage}，低吸容易接派发盘。"))
+        adjustments.append(_score_adjustment("主力行为", -route_config["distribution_penalty"], f"主力行为偏{context.main_force_stage}，低吸容易接派发盘。"))
         risks.append("主力行为偏派发")
-    risk_adj = _scaled(context.risk_score, 65, 12)
+    risk_adj = _scaled(context.risk_score, route_config["risk_threshold"], route_config["risk_weight"])
     adjustments.append(_score_adjustment("风险质量", risk_adj, f"风险扫描 {context.risk_score} 分，低吸必须先排除硬风险。"))
     intraday = context.signal("intraday")
     if intraday.status == "admitted":
@@ -1129,36 +1153,37 @@ def _reversal_low_absorption(context: _Context) -> FactionView:
     else:
         _append_signal_gap(risks, intraday, "盘口")
     if context.invalid_penalty:
-        penalty = min(22, context.invalid_penalty)
+        penalty = min(route_config["invalid_penalty_cap"], context.invalid_penalty)
         adjustments.append(_score_adjustment("规则约束", -penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，低吸派降权。"))
     return _finalize_faction("低吸反转派", "冰点修复/恐慌低吸", base, adjustments, rationale, risks)
 
 
 def _defensive_risk_control(context: _Context) -> FactionView:
-    base = 48
+    route_config = _committee_routing_config()["factions"]["defensive"]
+    base = route_config["base"]
     adjustments: list[dict[str, object]] = []
     rationale: list[str] = []
     risks: list[str] = []
-    if context.risk_score < 60:
-        adjustments.append(_score_adjustment("风险扫描", 24, f"风险扫描仅 {context.risk_score} 分，防守优先级上升。"))
+    if context.risk_score < route_config["risk_threshold"]:
+        adjustments.append(_score_adjustment("风险扫描", route_config["low_risk_score_bonus"], f"风险扫描仅 {context.risk_score} 分，防守优先级上升。"))
         rationale.append(f"风险扫描仅 {context.risk_score} 分，防守优先")
     else:
-        risk_adj = max(0, 12 - (context.risk_score - 60) // 3)
+        risk_adj = max(0, route_config["residual_risk_weight"] - (context.risk_score - route_config["risk_threshold"]) // route_config["residual_risk_divisor"])
         adjustments.append(_score_adjustment("风险扫描", risk_adj, f"风险扫描 {context.risk_score} 分，仍保留一定风控权重。"))
         rationale.append(f"风险扫描 {context.risk_score} 分")
     if context.sentiment_stage in {"冰点", "退潮"}:
-        adjustments.append(_score_adjustment("情绪防守", 18, f"情绪处于{context.sentiment_stage}，防守权重提高。"))
+        adjustments.append(_score_adjustment("情绪防守", route_config["cold_sentiment_bonus"], f"情绪处于{context.sentiment_stage}，防守权重提高。"))
         rationale.append(f"情绪处于{context.sentiment_stage}")
     elif context.sentiment_stage == "高潮":
-        adjustments.append(_score_adjustment("情绪兑现", 10, "情绪高潮，防守派关注兑现压力。"))
+        adjustments.append(_score_adjustment("情绪兑现", route_config["climax_bonus"], "情绪高潮，防守派关注兑现压力。"))
         rationale.append("情绪高潮，防守派关注兑现压力")
     else:
-        adjustments.append(_score_adjustment("机会成本", -6, "市场仍有进攻窗口，过度防守有机会成本。"))
+        adjustments.append(_score_adjustment("机会成本", -route_config["opportunity_cost_penalty"], "市场仍有进攻窗口，过度防守有机会成本。"))
         risks.append("市场仍有进攻窗口，过度防守可能有机会成本")
     if context.invalid_conditions:
-        adjustments.append(_score_adjustment("规则约束", 18, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，防守派加权。"))
+        adjustments.append(_score_adjustment("规则约束", route_config["invalid_condition_bonus"], f"存在 {len(context.invalid_conditions)} 项否决/降级条件，防守派加权。"))
         rationale.append("存在规则否决/降级条件")
-    market_adj = -_scaled(context.market_temperature, 70, 10)
+    market_adj = -_scaled(context.market_temperature, route_config["market_threshold"], route_config["market_weight"])
     adjustments.append(_score_adjustment("市场温度反向项", market_adj, f"市场温度 {context.market_temperature} 分；温度越高，纯防守分越低。"))
     return _finalize_faction("防守风控派", "仓位控制/等待确认", base, adjustments, rationale, risks)
 
@@ -1199,8 +1224,20 @@ def _finalize_faction(
     raw_score = base_score + sum(int(item["impact"]) for item in score_adjustments)
     final_score = clamp_score(raw_score)
     net = raw_score - base_score
-    explanation = f"基础分 {base_score}，净调整 {net:+d}，原始分 {raw_score}，限制到 0-100 后为 {final_score}。"
+    bounds = load_runtime_settings().get("scoring", "score_bounds")
+    explanation = (
+        f"基础分 {base_score}，净调整 {net:+d}，原始分 {raw_score}，"
+        f"限制到 {bounds['min']}-{bounds['max']} 后为 {final_score}。"
+    )
     return FactionView(name, route, final_score, rationale, risks, base_score, score_adjustments, explanation)
+
+
+def _committee_score_method() -> str:
+    bounds = load_runtime_settings().get("scoring", "score_bounds")
+    return (
+        "分数 = 流派基础分 + 市场/技术/资金/题材/风险/规则约束加减分，"
+        f"最终限制在 {bounds['min']}-{bounds['max']}。"
+    )
 
 
 def _infer_observed(reason: str) -> str:
@@ -1225,23 +1262,23 @@ def _infer_observed(reason: str) -> str:
 
 def _threshold_for_item(item: str) -> str:
     if "情绪" in item:
-        return "启动/发酵加分；高潮/退潮/冰点按流派降权"
+        return "按当前流派在运行配置中的情绪阶段规则调整"
     if "赚钱" in item:
-        return "60 分以上支持短线进攻"
+        return "按当前流派在运行配置中的赚钱效应门槛调整"
     if "资金" in item or "承接" in item or "扩散" in item:
-        return "55-65 分以上才说明资金连续"
+        return "按当前流派在运行配置中的资金门槛调整"
     if "题材" in item or "政策" in item or "市场关注" in item:
         return "启动/扩散阶段优于高潮/退潮"
     if "风险" in item or "风控" in item or "个股风险" in item:
-        return "65 分以上适合进攻；60 分以下优先降权"
+        return "按当前流派在运行配置中的风险门槛调整"
     if "规则" in item:
         return "T+1/ST/停牌/涨跌停等硬约束优先"
     if "技术" in item or "趋势" in item:
-        return "55 分以上趋势有效；45 分以下视为破坏"
+        return "按当前流派在运行配置中的技术门槛调整"
     if "基本面" in item:
-        return "60 分以上说明盈利/现金流证据尚可"
+        return "按当前流派在运行配置中的基本面门槛调整"
     if "市场温度" in item:
-        return "55 分以上支持扩散；70 分以上降低纯防守"
+        return "按当前流派在运行配置中的市场温度门槛调整"
     if "主力" in item:
         return "吸筹/拉升优于派发"
     if "机会成本" in item:
@@ -1278,7 +1315,8 @@ def _source_for_item(item: str) -> str:
 
 
 def _scaled(value: int, threshold: int, weight: int) -> int:
-    return int(round(max(-weight, min(weight, (value - threshold) / 25 * weight))))
+    divisor = float(_committee_routing_config()["scaled_divisor"])
+    return int(round(max(-weight, min(weight, (value - threshold) / divisor * weight))))
 
 
 def _rank_line(factions: list[FactionView]) -> str:
@@ -1355,7 +1393,7 @@ def _risk_challenge(context: _Context, findings: list[AgentFinding]) -> dict[str
         "missing_invalidation_boundaries": missing_boundaries,
         "verdict": (
             "存在规则约束或证据边界缺失，法官只能给出观察性路线结论。"
-            if context.invalid_conditions or missing_boundaries or (evidence_quality and evidence_quality.score < 70)
+            if context.invalid_conditions or missing_boundaries or (evidence_quality and evidence_quality.score < _committee_routing_config()["readiness_threshold"])
             else "未发现证据链硬缺口，但路线结论仍须随新公告、资金和市场状态复核。"
         ),
     }
@@ -1522,21 +1560,23 @@ def _playbook_template(faction_name: str) -> dict[str, list[str] | str]:
 
 
 def _stance_for_score(score: int) -> str:
-    if score >= 72:
+    config = _committee_routing_config()["stance"]
+    if score >= config["strong"]:
         return "强支持"
-    if score >= 62:
+    if score >= config["support"]:
         return "谨慎支持"
-    if score >= 50:
+    if score >= config["neutral"]:
         return "中性观察"
     return "反对/降权"
 
 
 def _reliability_label(score: int, gap: int) -> str:
-    if score >= 72 and gap >= 8:
+    config = _committee_routing_config()["reliability"]
+    if score >= config["high_score"] and gap >= config["high_gap"]:
         return "较高"
-    if score >= 62 and gap >= 4:
+    if score >= config["medium_high_score"] and gap >= config["medium_high_gap"]:
         return "中等偏高"
-    if score >= 55:
+    if score >= config["medium_score"]:
         return "中等"
     return "偏低"
 
@@ -1551,7 +1591,7 @@ def _recommendation_for_faction(faction: FactionView) -> str:
         "低吸反转派": "等待恐慌释放后的修复确认，分批观察，不提前抄底。",
         "防守风控派": "降低进攻优先级，保留观察记录，等待风险或资金信号改善。",
     }.get(faction.name, "保留观察，等待更高质量证据。")
-    if faction.score < 50:
+    if faction.score < _committee_routing_config()["stance"]["neutral"]:
         return f"当前降权：{base}"
     return base
 
@@ -1575,9 +1615,10 @@ def _question_focus(topic: str) -> str:
 
 def _question_response(faction: FactionView, topic: str) -> str:
     focus = _question_focus(topic)
-    if faction.score < 50:
+    stance = _committee_routing_config()["stance"]
+    if faction.score < stance["neutral"]:
         prefix = "本派对这个问题暂不支持直接执行"
-    elif faction.score < 62:
+    elif faction.score < stance["support"]:
         prefix = "本派认为这个问题只能继续观察"
     else:
         prefix = "本派认为这个问题具备讨论价值"

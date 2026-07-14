@@ -90,7 +90,10 @@ class FakeTushare:
         return [{"ann_date": "20260420", "end_date": "20260331", "total_revenue": 200, "n_income": 20}]
 
     def balancesheet(self, **kwargs):
-        return [{"ann_date": "20260420", "end_date": "20260331", "total_assets": 100, "total_hldr_eqy_exc_min_int": 50, "accounts_receiv": 20, "inventories": 10}]
+        return [{"ann_date": "20260420", "end_date": "20260331", "total_assets": 100, "total_hldr_eqy_exc_min_int": 50, "accounts_receiv": 20, "inventories": 10, "goodwill": 5}]
+
+    def pledge_stat(self, **kwargs):
+        return [{"ts_code": kwargs["ts_code"], "end_date": "20260704", "pledge_ratio": 12.5}]
 
     def cashflow(self, **kwargs):
         return [{"ann_date": "20260420", "end_date": "20260331", "n_cashflow_act": 30}]
@@ -302,6 +305,46 @@ class TushareMarketDataProviderTest(unittest.TestCase):
         )
         self.assertTrue(source.snapshot_ids)
         self.assertGreaterEqual(len(self.provider.get_evidence_sources("600519", "2026-07-10")), 5)
+
+    def test_fundamentals_include_goodwill_and_pledge_risk_provenance(self) -> None:
+        snapshot = self.provider.get_fundamentals("600519", "2026-07-10")
+
+        self.assertEqual(snapshot.goodwill_ratio, 10)
+        self.assertEqual(snapshot.goodwill_as_of, "2026-03-31")
+        self.assertEqual(snapshot.goodwill_source_id, "goodwill-risk-001")
+        self.assertEqual(snapshot.pledge_ratio, 12.5)
+        self.assertEqual(snapshot.pledge_as_of, "2026-07-04")
+        self.assertEqual(snapshot.pledge_source_id, "pledge-risk-001")
+        source = next(
+            item for item in self.provider.get_evidence_sources("600519", "2026-07-10")
+            if item.id == "pledge-risk-001"
+        )
+        self.assertTrue(source.snapshot_ids)
+        quality = next(
+            item for item in self.provider.get_data_quality_reports("600519", "2026-07-10")
+            if item.dataset == "pledge_risk"
+        )
+        self.assertEqual(quality.status, "passed")
+
+    def test_failed_pledge_query_does_not_synthesize_zero_risk(self) -> None:
+        class MissingPledgeTushare(FakeTushare):
+            def pledge_stat(self, **kwargs):
+                raise RuntimeError("not entitled")
+
+        provider = TushareMarketDataProvider(pro_client=MissingPledgeTushare())
+        snapshot = provider.get_fundamentals("600519", "2026-07-10")
+
+        self.assertIsNone(snapshot.pledge_ratio)
+        self.assertIsNone(snapshot.pledge_source_id)
+        quality = next(
+            item for item in provider.get_data_quality_reports("600519", "2026-07-10")
+            if item.dataset == "pledge_risk"
+        )
+        self.assertEqual(quality.status, "failed")
+        self.assertFalse(any(
+            item.id == "pledge-risk-001"
+            for item in provider.get_evidence_sources("600519", "2026-07-10")
+        ))
 
     def test_fundamentals_fill_same_period_peer_medians_with_provenance(self) -> None:
         snapshot = self.provider.get_fundamentals("600519", "2026-07-10")
