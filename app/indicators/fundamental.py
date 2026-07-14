@@ -19,9 +19,9 @@ class FundamentalAnalysis:
 
 def analyze_fundamental_quality(snapshot: FundamentalSnapshot) -> FundamentalAnalysis:
     missing: list[str] = []
-    margin = _divide(snapshot.net_income, snapshot.revenue)
-    turnover = _divide(snapshot.revenue, snapshot.total_assets)
-    multiplier = _divide(snapshot.total_assets, snapshot.total_equity)
+    margin = snapshot.net_profit_margin if snapshot.net_profit_margin is not None else _divide(snapshot.net_income, snapshot.revenue)
+    turnover = snapshot.asset_turnover if snapshot.asset_turnover is not None else _divide(snapshot.revenue, snapshot.total_assets)
+    multiplier = snapshot.equity_multiplier if snapshot.equity_multiplier is not None else _divide(snapshot.total_assets, snapshot.total_equity)
     if margin is None:
         missing.append("缺少净利润或营业收入，无法进行杜邦净利率拆解。")
     if turnover is None:

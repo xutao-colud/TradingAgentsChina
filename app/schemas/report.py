@@ -116,6 +116,9 @@ class FundamentalSnapshot:
     peer_as_of: str | None = None
     peer_source_id: str | None = None
     peer_unavailable_reasons: list[str] = field(default_factory=list)
+    net_profit_margin: float | None = None
+    asset_turnover: float | None = None
+    equity_multiplier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -163,12 +166,13 @@ class MoneyFlowSnapshot:
     super_large_net_inflow: float | None
     margin_balance_change: float | None
     northbound_signal: str
-    turnover_rate: float
+    turnover_rate: float | None
     block_trade_signal: str
     large_net_inflow: float | None = None
     medium_net_inflow: float | None = None
     small_net_inflow: float | None = None
     as_of: str | None = None
+    northbound_net_inflow: float | None = None
 
 
 @dataclass(frozen=True)

@@ -64,7 +64,7 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(flow.main_net_inflow, -5088655104.0)
         self.assertEqual(sources[1].source_type, "eastmoney_push2his")
 
-    def test_money_flow_falls_back_without_crashing_when_public_provider_fails(self) -> None:
+    def test_money_flow_failure_does_not_fall_back_to_sample_data(self) -> None:
         responses = ["not-json"]
 
         def fetch_text(url: str) -> str:
@@ -80,8 +80,10 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         flow = provider.get_money_flow("000725.SZ", "2026-07-10")
         sources = provider.get_evidence_sources("000725.SZ", "2026-07-10")
 
-        self.assertEqual(flow.main_net_inflow, 8000000)
-        self.assertEqual(sources[1].source_type, "offline_sample")
+        self.assertIsNone(flow.main_net_inflow)
+        self.assertIsNone(flow.super_large_net_inflow)
+        self.assertEqual(sources[1].source_type, "unavailable")
+        self.assertNotEqual(sources[1].source_type, "offline_sample")
 
     def test_daily_price_uses_snapshot_not_offline_sample_when_kline_fails(self) -> None:
         responses = [QUOTE_PAYLOAD, FLOW_PAYLOAD]

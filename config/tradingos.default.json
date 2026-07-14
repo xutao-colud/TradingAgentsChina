@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-13.13",
+  "rule_version": "2026-07-14.14",
   "runtime": {
     "network_timeout_seconds": 8,
     "llm_network_timeout_seconds": 45,
@@ -19,9 +19,9 @@
     "tushare": {
       "enabled": true,
       "token_env": "TUSHARE_TOKEN",
-      "capabilities": ["stock_profile", "daily_prices", "fundamentals", "industry_context", "money_flow", "market_context", "ah_premium", "dragon_tiger", "dragon_tiger_history", "margin_financing", "northbound_holding", "corporate_events", "convertible_bond", "raw_snapshots", "data_quality"],
+      "capabilities": ["stock_profile", "daily_prices", "fundamentals", "industry_context", "money_flow", "market_context", "ah_premium", "dragon_tiger", "dragon_tiger_history", "margin_financing", "northbound_holding", "northbound_market_flow", "corporate_events", "convertible_bond", "raw_snapshots", "data_quality"],
       "top_inst_side_codes": {"buy": "0", "sell": "1"},
-      "interfaces": {"stock_basic": "stock_basic", "daily": "daily", "daily_basic": "daily_basic", "fina_indicator": "fina_indicator", "fina_indicator_vip": "fina_indicator_vip", "income": "income", "balancesheet": "balancesheet", "cashflow": "cashflow", "moneyflow": "moneyflow", "industry_moneyflow": "moneyflow_ind_ths", "cb_basic": "cb_basic", "cb_daily": "cb_daily", "index_daily": "index_daily", "limit_list": "limit_list_d", "ah_comparison": "stk_ah_comparison", "policy_news": "major_news", "top_list": "top_list", "top_inst": "top_inst", "margin_detail": "margin_detail", "hk_hold": "hk_hold", "forecast": "forecast", "express": "express", "share_float": "share_float", "stk_holdertrade": "stk_holdertrade"},
+      "interfaces": {"stock_basic": "stock_basic", "daily": "daily", "daily_basic": "daily_basic", "fina_indicator": "fina_indicator", "fina_indicator_vip": "fina_indicator_vip", "income": "income", "balancesheet": "balancesheet", "cashflow": "cashflow", "moneyflow": "moneyflow", "northbound_market_flow": "moneyflow_hsgt", "industry_moneyflow": "moneyflow_ind_ths", "cb_basic": "cb_basic", "cb_daily": "cb_daily", "index_daily": "index_daily", "limit_list": "limit_list_d", "ah_comparison": "stk_ah_comparison", "policy_news": "major_news", "top_list": "top_list", "top_inst": "top_inst", "margin_detail": "margin_detail", "hk_hold": "hk_hold", "forecast": "forecast", "express": "express", "share_float": "share_float", "stk_holdertrade": "stk_holdertrade"},
       "fundamental_peers": {"enabled": true, "batch_enabled": false, "maximum_members": 30, "universe_fields": "ts_code,industry,list_status", "batch_fields": "ts_code,ann_date,end_date,or_yoy,q_netprofit_yoy,roe,grossprofit_margin,debt_to_assets", "metric_fields": {"revenue_growth_yoy": "or_yoy", "profit_growth_yoy": "q_netprofit_yoy", "roe": "roe", "gross_margin": "grossprofit_margin", "debt_to_asset": "debt_to_assets"}},
       "industry_prosperity": {"enabled": true, "valuation_history_points": 24, "valuation_calendar_lookback_days": 1095, "maximum_peer_members": 12, "minimum_peer_samples": 3, "industry_name_aliases": {}, "chain_relations": []},
       "ah_premium": {"available_since": "2025-08-12", "comparison_tolerance_pct": 0.5},
@@ -216,6 +216,17 @@
         "empty_status": "warning",
         "blocking": false
       },
+      "northbound_market_flow": {
+        "required_fields": ["trade_date", "northbound_net_inflow", "source_id"],
+        "finite_fields": ["northbound_net_inflow"],
+        "non_negative_fields": [],
+        "date_field": "trade_date",
+        "unique_fields": ["trade_date", "source_id"],
+        "require_analysis_date_match": true,
+        "allow_future_date": false,
+        "empty_status": "warning",
+        "blocking": false
+      },
       "capital_flow_history": {
         "required_fields": ["trade_date", "source_ids"],
         "finite_fields": ["main_net_inflow", "northbound_holding_change", "margin_balance"],
@@ -340,7 +351,7 @@
     "market": {"index_weight": 12, "breadth_weight": 60, "limit_up_cap": 12, "limit_up_divisor": 8, "limit_down_cap": 12, "limit_down_divisor": 3, "positive_threshold": 72, "weak_threshold": 42, "repair_threshold": 60, "low_amount": 800000000000},
     "fundamental": {"profit_cap": 18, "profit_weight": 0.7, "roe_cap": 14, "roe_weight": 0.35, "margin_cap": 10, "margin_weight": 0.08, "cashflow_cap": 10, "cashflow_weight": 10, "debt_threshold": 45, "debt_weight": 0.4, "pe_threshold": 35, "pe_weight": 0.5, "forecast_upgrade_bonus": 5, "strong_threshold": 70, "valuation_risk_pe": 25},
     "technical": {"trend_bonus": 12, "trend_penalty": 6, "return_cap": 16, "return_floor": -12, "return_weight": 1.5, "volume_low": 1.05, "volume_high": 1.8, "volume_bonus": 8, "overheat_volume": 2.5, "overheat_penalty": 8, "strong_threshold": 65, "weak_threshold": 42, "chase_risk_return": 8, "ma_short": 5, "ma_medium": 10, "ma_long": 20, "volume_recent_window": 5, "volume_base_window": 20},
-    "capital": {"main_cap": 18, "main_divisor": 10000000, "super_cap": 10, "super_divisor": 12000000, "margin_cap": 8, "margin_floor": -8, "margin_weight": 5, "northbound_bonus": 6, "turnover_risk": 8, "turnover_penalty": 8, "strong_threshold": 62},
+    "capital": {"main_cap": 18, "main_divisor": 10000000, "super_cap": 10, "super_divisor": 12000000, "margin_cap": 8, "margin_floor": -8, "margin_weight": 5, "northbound_market_scale": 1000000000, "northbound_market_max_impact": 6, "turnover_risk": 8, "turnover_penalty": 8, "strong_threshold": 62},
     "theme": {"base": 50, "match_weight": 8, "strong_threshold": 65},
     "announcement": {"base": 50, "official_positive": 10, "other_positive": 6, "official_negative": 16, "other_negative": 8, "positive_threshold": 60, "risk_threshold": 45},
     "data_readiness": {"minimum_daily_bars": 20, "verified_score": 90, "mixed_score": 55, "quality_warning_score": 70, "sample_score": 40, "insufficient_score": 20, "required_source_ids": ["price-001", "fund-001", "flow-001", "market-001"], "time_sensitive_source_ids": ["price-001", "flow-001", "market-001"]},

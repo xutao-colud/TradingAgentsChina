@@ -112,6 +112,9 @@ class FakeTushare:
             "buy_sm_amount": 30, "sell_sm_amount": 70,
         }]
 
+    def moneyflow_hsgt(self, **kwargs):
+        return [{"trade_date": "20260710", "north_money": 1500.0}]
+
     def moneyflow_ind_ths(self, **kwargs):
         return [
             {"trade_date": "20260710", "ts_code": "881100.TI", "industry": "半导体", "net_amount": 8, "pct_change": 2.0, "company_num": 80},
@@ -281,8 +284,23 @@ class TushareMarketDataProviderTest(unittest.TestCase):
     def test_core_provider_methods_do_not_use_sample_data(self) -> None:
         self.assertEqual(self.provider.get_stock_profile("600519").name, "测试股份")
         self.assertEqual(self.provider.get_daily_prices("600519", "2026-07-10", 30)[-1].turnover_rate, 3.2)
-        self.assertEqual(self.provider.get_money_flow("600519", "2026-07-10").northbound_signal, "北向持股增加")
-        self.assertEqual(self.provider.get_money_flow("600519", "2026-07-10").large_net_inflow, 300_000)
+        flow = self.provider.get_money_flow("600519", "2026-07-10")
+        self.assertEqual(flow.northbound_signal, "个股北向持股增加；全市场北向净流入")
+        self.assertEqual(flow.northbound_net_inflow, 1_500_000_000)
+        self.assertEqual(flow.turnover_rate, 3.2)
+        self.assertEqual(flow.large_net_inflow, 300_000)
+        quality = next(
+            item
+            for item in self.provider.get_data_quality_reports("600519", "2026-07-10")
+            if item.dataset == "northbound_market_flow"
+        )
+        self.assertEqual(quality.status, "passed")
+        source = next(
+            item
+            for item in self.provider.get_evidence_sources("600519", "2026-07-10")
+            if item.id == "northbound-market-001"
+        )
+        self.assertTrue(source.snapshot_ids)
         self.assertGreaterEqual(len(self.provider.get_evidence_sources("600519", "2026-07-10")), 5)
 
     def test_fundamentals_fill_same_period_peer_medians_with_provenance(self) -> None:
@@ -294,6 +312,9 @@ class TushareMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(snapshot.peer_medians["debt_to_asset"], 40)
         self.assertEqual(snapshot.peer_sample_sizes["roe"], 3)
         self.assertEqual(snapshot.peer_source_id, "peer-fund-001")
+        self.assertEqual(snapshot.net_profit_margin, 0.1)
+        self.assertEqual(snapshot.asset_turnover, 2.0)
+        self.assertEqual(snapshot.equity_multiplier, 2.0)
         source = next(
             item
             for item in self.provider.get_evidence_sources("600519", "2026-07-10")
@@ -306,6 +327,23 @@ class TushareMarketDataProviderTest(unittest.TestCase):
             if item.dataset == "fundamental_peers"
         )
         self.assertEqual(quality.status, "passed")
+
+    def test_missing_northbound_market_flow_is_not_relabelled_as_zero(self) -> None:
+        class MissingNorthboundMarketFlow(FakeTushare):
+            def moneyflow_hsgt(self, **kwargs):
+                raise RuntimeError("entitlement unavailable")
+
+        provider = TushareMarketDataProvider(pro_client=MissingNorthboundMarketFlow())
+        flow = provider.get_money_flow("600519", "2026-07-10")
+
+        self.assertIsNone(flow.northbound_net_inflow)
+        quality = next(
+            item
+            for item in provider.get_data_quality_reports("600519", "2026-07-10")
+            if item.dataset == "northbound_market_flow"
+        )
+        self.assertEqual(quality.status, "warning")
+        self.assertFalse(any(item.id == "northbound-market-001" for item in provider.get_evidence_sources("600519", "2026-07-10")))
 
     def test_capital_flow_history_is_dated_and_quality_checked(self) -> None:
         history = self.provider.get_capital_flow_history("600519", "2026-07-10")

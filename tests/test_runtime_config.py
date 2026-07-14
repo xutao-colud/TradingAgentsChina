@@ -27,7 +27,7 @@ class RuntimeConfigTest(unittest.TestCase):
     def test_default_configuration_has_a_versioned_source(self) -> None:
         settings = load_runtime_settings()
 
-        self.assertEqual(settings.rule_version, "2026-07-13.13")
+        self.assertEqual(settings.rule_version, "2026-07-14.14")
         self.assertEqual(settings.source, str(DEFAULT_CONFIG_PATH.resolve()))
         self.assertEqual(settings.get("runtime", "snapshot_max_workers"), 4)
         self.assertEqual(settings.get("domain_knowledge", "technical", "history_bars"), 120)

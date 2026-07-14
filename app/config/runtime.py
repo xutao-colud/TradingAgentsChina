@@ -75,6 +75,7 @@ def _validate(data: object) -> None:
         ("data_quality", "datasets", "industry_flow"),
         ("data_quality", "datasets", "industry_valuation"),
         ("data_quality", "datasets", "northbound_holding"),
+        ("data_quality", "datasets", "northbound_market_flow"),
         ("data_quality", "datasets", "capital_flow_history"),
         ("providers", "models"), ("scoring", "score_bounds", "min"),
         ("scoring", "score_bounds", "max"), ("scoring", "data_readiness", "minimum_daily_bars"),
@@ -239,10 +240,10 @@ def _validate(data: object) -> None:
             or not relation.get("as_of")
         ):
             raise RuntimeError("industry chain relations require target, stage, industry, source_id, and as_of")
-    for interface in ("stock_basic", "fina_indicator", "fina_indicator_vip", "industry_moneyflow", "ah_comparison"):
+    for interface in ("stock_basic", "fina_indicator", "fina_indicator_vip", "industry_moneyflow", "ah_comparison", "northbound_market_flow"):
         if interface not in settings.get("providers", "tushare", "interfaces"):
             raise RuntimeError(f"tushare.interfaces misses: {interface}")
-    for dataset in ("daily_prices", "dragon_tiger", "dragon_tiger_history", "announcements", "margin_financing", "market_sentiment", "ah_premium", "fundamental_peers", "industry_flow", "industry_valuation", "northbound_holding", "capital_flow_history"):
+    for dataset in ("daily_prices", "dragon_tiger", "dragon_tiger_history", "announcements", "margin_financing", "market_sentiment", "ah_premium", "fundamental_peers", "industry_flow", "industry_valuation", "northbound_holding", "northbound_market_flow", "capital_flow_history"):
         rules = settings.get("data_quality", "datasets", dataset)
         required_rule_keys = {
             "required_fields",
@@ -260,6 +261,9 @@ def _validate(data: object) -> None:
             raise RuntimeError(f"data_quality.datasets.{dataset} misses: {', '.join(missing_rule_keys)}")
         if rules["empty_status"] not in {"passed", "warning", "failed"}:
             raise RuntimeError(f"data_quality.datasets.{dataset}.empty_status is invalid")
+    capital_scoring = settings.get("scoring", "capital")
+    if capital_scoring["northbound_market_scale"] <= 0 or capital_scoring["northbound_market_max_impact"] < 0:
+        raise RuntimeError("capital northbound-market scoring scale/impact is invalid")
     characteristics = settings.get("domain_knowledge", "a_share_characteristics")
     if not 0 <= characteristics["minimum_seal_rate_pct"] <= characteristics["maximum_seal_rate_pct"] <= 100:
         raise RuntimeError("a_share_characteristics seal-rate bounds are invalid")

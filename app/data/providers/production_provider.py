@@ -83,7 +83,7 @@ class ProductionMarketDataProvider(MarketDataProvider):
         return MoneyFlowSnapshot(
             flow.main_net_inflow, flow.super_large_net_inflow, flow.margin_balance_change, northbound_signal,
             flow.turnover_rate, flow.block_trade_signal, flow.large_net_inflow, flow.medium_net_inflow,
-            flow.small_net_inflow, flow.as_of,
+            flow.small_net_inflow, flow.as_of, flow.northbound_net_inflow,
         )
 
     def get_capital_flow_history(self, symbol: str, analysis_date: str) -> list[CapitalFlowObservation]:

@@ -150,6 +150,11 @@ class TushareMarketDataProvider(MarketDataProvider):
         net_income = _optional_number(income, "n_income")
         operating_cash_flow = _optional_number(cashflow, "n_cashflow_act")
         cashflow_quality = operating_cash_flow / net_income if operating_cash_flow is not None and net_income not in {None, 0} else _number(row, "ocf_yoy")
+        total_assets = _optional_number(balance, "total_assets")
+        total_equity = _optional_number(balance, "total_hldr_eqy_exc_min_int")
+        net_profit_margin = net_income / revenue if net_income is not None and revenue not in {None, 0} else None
+        asset_turnover = revenue / total_assets if revenue is not None and total_assets not in {None, 0} else None
+        equity_multiplier = total_assets / total_equity if total_assets is not None and total_equity not in {None, 0} else None
         target_snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[target_snapshot_start:]]
         if row:
             self._record_evidence(
@@ -171,8 +176,8 @@ class TushareMarketDataProvider(MarketDataProvider):
             revenue=revenue,
             net_income=net_income,
             operating_cash_flow=operating_cash_flow,
-            total_assets=_optional_number(balance, "total_assets"),
-            total_equity=_optional_number(balance, "total_hldr_eqy_exc_min_int"),
+            total_assets=total_assets,
+            total_equity=total_equity,
             accounts_receivable=_optional_number(balance, "accounts_receiv"),
             inventory=_optional_number(balance, "inventories"),
             statement_as_of=_iso_date(_text(income, "end_date", default="")) or None,
@@ -181,6 +186,9 @@ class TushareMarketDataProvider(MarketDataProvider):
             peer_as_of=peer_as_of,
             peer_source_id=peer_source_id,
             peer_unavailable_reasons=peer_reasons,
+            net_profit_margin=net_profit_margin,
+            asset_turnover=asset_turnover,
+            equity_multiplier=equity_multiplier,
         )
 
     def _peer_medians(
@@ -489,6 +497,34 @@ class TushareMarketDataProvider(MarketDataProvider):
         signals = self.get_market_signals(symbol, analysis_date)
         normalized = normalize_symbol(symbol)
         tier_row = _latest_record(self._query("moneyflow", ts_code=normalized, trade_date=_compact_date(analysis_date)))
+        market_flow_rows = self._query("northbound_market_flow", trade_date=_compact_date(analysis_date))
+        market_flow_snapshot_ids = self._snapshot_ids(("northbound_market_flow",), normalized, analysis_date)
+        normalized_market_flows = [
+            {
+                "trade_date": _iso_date(_text(row, "trade_date")),
+                "northbound_net_inflow": float(value) * 1_000_000,
+                "source_id": "northbound-market-001",
+            }
+            for row in market_flow_rows
+            if _text(row, "trade_date") and (value := _optional_number(row, "north_money")) is not None
+        ]
+        valid_market_flows, market_flow_quality = validate_dataset_records(
+            provider="tushare",
+            dataset="northbound_market_flow",
+            records=normalized_market_flows,
+            analysis_date=analysis_date,
+            snapshot_ids=market_flow_snapshot_ids,
+        )
+        self._quality_reports[(normalized, analysis_date, "northbound_market_flow")] = market_flow_quality
+        northbound_net_inflow = (
+            float(valid_market_flows[0]["northbound_net_inflow"])
+            if len(valid_market_flows) == 1 and market_flow_quality.status == "passed"
+            else None
+        )
+        daily_basic_row = _latest_record(
+            self._query("daily_basic", ts_code=normalized, trade_date=_compact_date(analysis_date))
+        )
+        turnover_rate = _optional_number(daily_basic_row, "turnover_rate")
         margin = signals.margin_financing
         northbound = signals.northbound_holding
         margin_change: float | None = None
@@ -496,7 +532,10 @@ class TushareMarketDataProvider(MarketDataProvider):
             margin_change = (margin.margin_buy_amount - margin.margin_repay_amount) / margin.margin_balance * 100
         northbound_signal = "北向数据不可用"
         if northbound and northbound.holding_change is not None:
-            northbound_signal = "北向持股增加" if northbound.holding_change > 0 else "北向持股减少" if northbound.holding_change < 0 else "北向持股持平"
+            northbound_signal = "个股北向持股增加" if northbound.holding_change > 0 else "个股北向持股减少" if northbound.holding_change < 0 else "个股北向持股持平"
+        if northbound_net_inflow is not None:
+            market_direction = "全市场北向净流入" if northbound_net_inflow > 0 else "全市场北向净流出" if northbound_net_inflow < 0 else "全市场北向净流量持平"
+            northbound_signal = market_direction if northbound_signal == "北向数据不可用" else f"{northbound_signal}；{market_direction}"
         super_large = _tier_net(tier_row, "buy_elg_amount", "sell_elg_amount")
         large = _tier_net(tier_row, "buy_lg_amount", "sell_lg_amount")
         medium = _tier_net(tier_row, "buy_md_amount", "sell_md_amount")
@@ -504,18 +543,27 @@ class TushareMarketDataProvider(MarketDataProvider):
         main = _optional_number(tier_row, "net_mf_amount")
         if main is not None:
             main *= 10_000
-        if margin or northbound or tier_row:
-            source_type = "tushare_moneyflow_margin_hk_hold" if tier_row else "tushare_margin_hk_hold"
+        if margin or northbound or tier_row or northbound_net_inflow is not None:
+            source_type = "tushare_moneyflow_margin_hk_hold_moneyflow_hsgt"
             self._record_evidence(
                 "flow-001",
-                f"{normalized} Tushare 分档资金/两融/北向",
+                f"{normalized} Tushare 分档资金/两融/个股北向持股与市场北向净流量",
                 source_type,
                 analysis_date,
-                self._snapshot_ids(("moneyflow", "margin_detail", "hk_hold"), normalized, analysis_date),
+                self._snapshot_ids(("moneyflow", "margin_detail", "hk_hold", "northbound_market_flow", "daily_basic"), normalized, analysis_date),
+            )
+        if northbound_net_inflow is not None:
+            self._record_evidence(
+                "northbound-market-001",
+                f"{analysis_date} 全市场北向资金净流量",
+                "tushare_moneyflow_hsgt",
+                analysis_date,
+                market_flow_snapshot_ids,
             )
         return MoneyFlowSnapshot(
-            main, super_large, margin_change, northbound_signal, 0.0, "大宗交易数据未获取",
+            main, super_large, margin_change, northbound_signal, turnover_rate, "大宗交易数据未获取",
             large_net_inflow=large, medium_net_inflow=medium, small_net_inflow=small, as_of=analysis_date,
+            northbound_net_inflow=northbound_net_inflow,
         )
 
     def get_capital_flow_history(self, symbol: str, analysis_date: str) -> list[CapitalFlowObservation]:

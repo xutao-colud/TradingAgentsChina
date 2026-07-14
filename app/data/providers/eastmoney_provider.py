@@ -11,7 +11,6 @@ from urllib.request import Request, urlopen
 
 from app.data.providers.base import MarketDataProvider
 from app.config.runtime import load_runtime_settings
-from app.data.providers.sample_provider import SampleMarketDataProvider
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient, StockRealtimeSnapshot
 from app.rules.trading_rules import normalize_symbol
 from app.schemas.report import (
@@ -31,8 +30,8 @@ FetchText = Callable[[str], str]
 class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
     """Realtime-first provider for quote, daily bars, profile, and money flow.
 
-    Fundamentals, announcements, and broad market context still fall back to the
-    deterministic provider until authenticated production sources are added.
+    Unsupported dimensions delegate to an explicit real-source composition.
+    Sample data is used only when a caller deliberately injects a sample provider.
     """
 
     def __init__(
@@ -41,7 +40,11 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
         snapshot_client: EastmoneyStockSnapshotClient | None = None,
         fetch_text: FetchText | None = None,
     ) -> None:
-        self.fallback = fallback or SampleMarketDataProvider()
+        if fallback is None:
+            from app.data.providers.production_provider import ProductionMarketDataProvider
+
+            fallback = ProductionMarketDataProvider()
+        self.fallback = fallback
         self.snapshot_client = snapshot_client or EastmoneyStockSnapshotClient()
         self._fetch_text = fetch_text or _fetch_text
         self._snapshot_cache: dict[str, StockRealtimeSnapshot] = {}
@@ -100,21 +103,31 @@ class EastmoneyRealtimeMarketDataProvider(MarketDataProvider):
         except (OSError, URLError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             flow = None
         if flow is None:
-            self._flow_sources[normalized] = "offline_sample"
-            return self.fallback.get_money_flow(normalized, analysis_date)
+            fallback_flow = self.fallback.get_money_flow(normalized, analysis_date)
+            self._flow_sources[normalized] = next(
+                (
+                    item.source_type
+                    for item in self.fallback.get_evidence_sources(normalized, analysis_date)
+                    if item.id == "flow-001"
+                ),
+                "unavailable",
+            )
+            return fallback_flow
+        fallback_flow = self.fallback.get_money_flow(normalized, analysis_date)
         self._flow_sources[normalized] = "eastmoney_push2his"
         self._flow_as_of[normalized] = flow.trade_date or analysis_date
         return MoneyFlowSnapshot(
-            main_net_inflow=flow.main_net_inflow or 0.0,
-            super_large_net_inflow=flow.super_large_net_inflow or 0.0,
-            margin_balance_change=self.fallback.get_money_flow(normalized, analysis_date).margin_balance_change,
-            northbound_signal="北向暂未接入；使用东方财富分档资金",
-            turnover_rate=snapshot.turnover_rate or 0.0,
-            block_trade_signal="大宗交易暂未接入实时源",
+            main_net_inflow=flow.main_net_inflow,
+            super_large_net_inflow=flow.super_large_net_inflow,
+            margin_balance_change=fallback_flow.margin_balance_change,
+            northbound_signal=fallback_flow.northbound_signal,
+            turnover_rate=snapshot.turnover_rate if snapshot.turnover_rate is not None else fallback_flow.turnover_rate,
+            block_trade_signal=fallback_flow.block_trade_signal,
             large_net_inflow=flow.large_net_inflow,
             medium_net_inflow=flow.medium_net_inflow,
             small_net_inflow=flow.small_net_inflow,
             as_of=flow.trade_date,
+            northbound_net_inflow=fallback_flow.northbound_net_inflow,
         )
 
     def get_announcements(self, symbol: str, analysis_date: str) -> list[Announcement]:
@@ -194,32 +207,27 @@ def _prices_from_snapshot_for_date(snapshot: StockRealtimeSnapshot, analysis_dat
     never be relabelled as a user-requested historical analysis date.
     """
     snapshot_date = snapshot.money_flow.trade_date if snapshot.money_flow else None
-    if snapshot.price is None or snapshot_date != analysis_date:
+    required_values = (
+        snapshot.price,
+        snapshot.open,
+        snapshot.high,
+        snapshot.low,
+        snapshot.volume,
+        snapshot.amount,
+    )
+    if snapshot_date != analysis_date or any(value is None for value in required_values):
         return []
     trade_date = snapshot_date
-    latest = DailyPrice(
+    return [DailyPrice(
         trade_date=trade_date,
-        open=snapshot.open if snapshot.open is not None else snapshot.price,
-        high=snapshot.high if snapshot.high is not None else snapshot.price,
-        low=snapshot.low if snapshot.low is not None else snapshot.price,
-        close=snapshot.price,
-        volume=snapshot.volume or 0.0,
-        amount=snapshot.amount or 0.0,
-        turnover_rate=snapshot.turnover_rate or 0.0,
-    )
-    if snapshot.previous_close is None:
-        return [latest]
-    previous = DailyPrice(
-        trade_date=trade_date,
-        open=snapshot.previous_close,
-        high=snapshot.previous_close,
-        low=snapshot.previous_close,
-        close=snapshot.previous_close,
-        volume=0.0,
-        amount=0.0,
-        turnover_rate=0.0,
-    )
-    return [previous, latest]
+        open=float(snapshot.open),
+        high=float(snapshot.high),
+        low=float(snapshot.low),
+        close=float(snapshot.price),
+        volume=float(snapshot.volume),
+        amount=float(snapshot.amount),
+        turnover_rate=snapshot.turnover_rate,
+    )]
 
 
 def _secid(symbol: str) -> str:

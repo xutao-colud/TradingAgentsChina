@@ -14,14 +14,25 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot, signals: AshareMarketSignals |
         score += min(config["super_cap"], flow.super_large_net_inflow / config["super_divisor"])
     if flow.margin_balance_change is not None:
         score += min(config["margin_cap"], max(config["margin_floor"], flow.margin_balance_change * config["margin_weight"]))
-    score += config["northbound_bonus"] if "流入" in flow.northbound_signal else 0
-    score -= config["turnover_penalty"] if flow.turnover_rate > config["turnover_risk"] else 0
-    final_score = clamp_score(score)
+    if flow.northbound_net_inflow is not None:
+        northbound_impact = flow.northbound_net_inflow / config["northbound_market_scale"]
+        score += max(-config["northbound_market_max_impact"], min(config["northbound_market_max_impact"], northbound_impact))
+    score -= config["turnover_penalty"] if flow.turnover_rate is not None and flow.turnover_rate > config["turnover_risk"] else 0
+    has_stock_northbound = bool(
+        (signals and signals.northbound_holding and signals.northbound_holding.holding_change is not None)
+        or "个股北向" in flow.northbound_signal
+    )
+    has_core_flow = any(
+        value is not None
+        for value in (flow.main_net_inflow, flow.super_large_net_inflow, flow.margin_balance_change)
+    ) or has_stock_northbound
+    final_score = clamp_score(score if has_core_flow else load_runtime_settings().get("scoring", "score_bounds", "neutral"))
     evidence = [
         f"主力净流入 {flow.main_net_inflow / 100_000_000:.2f} 亿元" if flow.main_net_inflow is not None else "主力净流入：数据不可用",
         f"超大单净流入 {flow.super_large_net_inflow / 100_000_000:.2f} 亿元" if flow.super_large_net_inflow is not None else "超大单净流入：数据不可用",
         f"融资余额变化 {flow.margin_balance_change:.2f}" if flow.margin_balance_change is not None else "融资余额变化：数据不可用",
         f"北向信号：{flow.northbound_signal}",
+        f"全市场北向净流入 {flow.northbound_net_inflow / 100_000_000:.2f} 亿元" if flow.northbound_net_inflow is not None else "全市场北向净流入：数据不可用",
         f"大宗交易：{flow.block_trade_signal}",
     ]
     if flow.large_net_inflow is not None:
@@ -30,11 +41,9 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot, signals: AshareMarketSignals |
         evidence.append(f"中单净流入 {flow.medium_net_inflow / 100_000_000:.2f} 亿元")
     if flow.small_net_inflow is not None:
         evidence.append(f"小单净流入 {flow.small_net_inflow / 100_000_000:.2f} 亿元")
-    has_core_flow = any(
-        value is not None
-        for value in (flow.main_net_inflow, flow.super_large_net_inflow, flow.margin_balance_change)
-    ) or "不可用" not in flow.northbound_signal
     source_ids = ["flow-001"] if has_core_flow else []
+    if flow.northbound_net_inflow is not None:
+        source_ids.append("northbound-market-001")
     if signals and signals.margin_financing:
         margin = signals.margin_financing
         evidence.append(f"两融明细：融资余额 {margin.margin_balance if margin.margin_balance is not None else '未披露'}，融资买入 {margin.margin_buy_amount if margin.margin_buy_amount is not None else '未披露'}。")
@@ -49,6 +58,7 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot, signals: AshareMarketSignals |
             ("主力净流入", flow.main_net_inflow),
             ("超大单净流入", flow.super_large_net_inflow),
             ("融资余额变化", flow.margin_balance_change),
+            ("全市场北向净流入", flow.northbound_net_inflow),
         )
         if value is None
     ]
