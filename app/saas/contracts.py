@@ -42,6 +42,8 @@ class StrategyOutcomeRecord:
     outcome_days: int
     aggregate_consent: bool
     outcome_source: Literal["manual", "broker_import", "simulated"] = "manual"
+    market_regime: str = "unknown"
+    agent_scores: dict[str, int] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid4()))
     created_at: str = field(default_factory=utc_now_iso)
 

@@ -238,11 +238,43 @@ class LocalMemoryStore:
                     outcome_days=outcome_days,
                     aggregate_consent=aggregate_consent,
                     outcome_source="manual",
+                    market_regime=str(report.get("market_regime", "unknown")),
+                    agent_scores={
+                        str(item["agent"]): int(item["score"])
+                        for item in report.get("agent_findings", [])
+                        if isinstance(item, dict)
+                        and isinstance(item.get("agent"), str)
+                        and isinstance(item.get("score"), int)
+                    },
                     id=str(feedback.get("id")),
                     created_at=str(feedback.get("created_at")),
                 )
             )
         return outcomes
+
+    def replay_analysis(self, analysis_report_id: str) -> dict[str, Any]:
+        """Return an immutable report with its recorded feedback for review.
+
+        Replay never recomputes the old conclusion against new data. It makes
+        the original evidence and later user-recorded outcomes available side by
+        side so the user can evaluate the decision process honestly.
+        """
+        event = next((item for item in self._read_jsonl(self.analysis_path) if item.get("id") == analysis_report_id), None)
+        if event is None:
+            raise ValueError(f"Unknown analysis report: {analysis_report_id}")
+        feedback = [
+            item
+            for item in self._read_jsonl(self.feedback_path)
+            if item.get("analysis_report_id") == analysis_report_id
+        ]
+        report = event.get("payload", {}).get("report", {})
+        return {
+            "analysis_event": event,
+            "report_snapshot": report,
+            "feedback_events": feedback,
+            "replay_status": "outcome_recorded" if any(item.get("feedback_type") == "outcome" for item in feedback) else "awaiting_outcome",
+            "guardrail": "回放展示原始判断与后续记录；不把单次结果解释为战法因果或未来收益承诺。",
+        }
 
     def build_context(self, symbol: str, limit: int = 3) -> dict[str, Any]:
         profile = self.load_profile()

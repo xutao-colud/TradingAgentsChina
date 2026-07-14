@@ -213,7 +213,8 @@ function renderReport(report) {
   $("emptyReport").hidden = true; $("reportContent").hidden = false;
   text($("reportDate"), report.analysis_date); text($("reportSymbol"), report.symbol); text($("reportTitle"), report.name);
   const realtime = report.realtime_quote;
-  text($("realtimeReport"), realtime ? `实时参考 · ${realtime.source || "unknown"} · ${realtime.price ?? "不可用"} · ${percentage(realtime.change_pct)} · ${realtime.trade_date || ""} ${realtime.trade_time || ""} · ${realtime.data_status}` : "未请求实时行情上下文");
+  const dataLabel = `研究数据：${report.data_status || "未知"}`;
+  text($("realtimeReport"), realtime ? `${dataLabel} · 实时参考 · ${realtime.source || "unknown"} · ${realtime.price ?? "不可用"} · ${percentage(realtime.change_pct)} · ${realtime.trade_date || ""} ${realtime.trade_time || ""} · ${realtime.data_status}` : `${dataLabel} · 未请求实时行情上下文`);
   text($("verdict"), report.conclusion); $("verdict").dataset.risk = report.risk_level;
   const scores = $("scores"); scores.replaceChildren();
   [["基本", report.fundamental_score], ["技术", report.technical_score], ["资金", report.capital_flow_score], ["题材", report.theme_score]].forEach(([label, value]) => scores.append(scoreTile(label, value)));

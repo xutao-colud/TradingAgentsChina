@@ -6,7 +6,7 @@ from typing import Any
 from app.schemas.report import AnalysisReport
 
 
-PROMPT_CONTRACT_VERSION = "reverse-audit-v1"
+PROMPT_CONTRACT_VERSION = "reverse-audit-v2"
 
 
 def build_explanation_system_prompt() -> str:
@@ -25,7 +25,10 @@ def build_explanation_system_prompt() -> str:
         "5. 与用户打法的匹配/不匹配：结合TradingProfile和历史记忆，不给所有用户同一答案。\n"
         "6. 下一步核验清单：列出还需要补的真实数据源、时间点和验证动作。\n\n"
         "表达规则：优先说“当前证据支持/不支持”，允许输出“证据不足”。不要承诺收益，"
-        "不要使用“必涨、必跌、稳赚、无风险”等确定性表述。"
+        "不要使用“必涨、必跌、稳赚、无风险”等确定性表述。\n\n"
+        "数据边界：必须先读取报告的 data_status 和“数据就绪性审查”。当状态不是“已核验”时，"
+        "首句必须明确说明数据不足、混合或样例边界；不得把分数、历史样例或实时参考写成真实市场事实，"
+        "不得扩展为参与建议，只能给出补数与核验清单。"
     )
 
 
@@ -51,6 +54,7 @@ def build_reverse_reasoning_tasks(report: AnalysisReport) -> dict[str, object]:
             "symbol": report.symbol,
             "name": report.name,
             "conclusion": report.conclusion,
+            "data_status": report.data_status,
             "risk_level": report.risk_level,
             "action_plan": report.action_plan,
             "market_regime": report.market_regime,

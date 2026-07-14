@@ -4,7 +4,16 @@ import re
 
 from dataclasses import dataclass
 
-from app.schemas.report import AgentFinding, SkillInsight
+from app.config.runtime import load_runtime_settings
+from app.schemas.report import (
+    AgentFinding,
+    AshareMarketSignals,
+    DataQualityReport,
+    EvidenceSource,
+    IntradaySnapshot,
+    MoneyFlowSnapshot,
+    SkillInsight,
+)
 from app.skills.common import clamp_score
 
 
@@ -20,23 +29,90 @@ class FactionView:
     score_explanation: str
 
 
+@dataclass(frozen=True)
+class _CommitteeSignal:
+    name: str
+    status: str
+    observed: str
+    values: dict[str, float]
+    as_of: str | None
+    source_ids: list[str]
+    quality_status: str
+    limitations: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "status": self.status,
+            "observed": self.observed,
+            "values": dict(self.values),
+            "as_of": self.as_of,
+            "source_ids": list(self.source_ids),
+            "quality_status": self.quality_status,
+            "limitations": list(self.limitations),
+        }
+
+
 def assess_investment_faction_committee(
     findings: list[AgentFinding],
     skill_insights: list[SkillInsight],
     invalid_conditions: list[str],
     user_question: str | None = None,
+    *,
+    analysis_date: str | None = None,
+    market_signals: AshareMarketSignals | None = None,
+    money_flow: MoneyFlowSnapshot | None = None,
+    intraday: IntradaySnapshot | None = None,
+    evidence_sources: list[EvidenceSource] | None = None,
+    quality_reports: list[DataQualityReport] | None = None,
 ) -> SkillInsight:
     """Compare A-share investment schools under the same evidence set.
 
-    The score is a deterministic "win-rate proxy" for research routing, not a
-    promised or backtested return. It helps the product decide which playbook is
-    currently the most persuasive for the user's next layer of analysis.
+    The score is a deterministic evidence-fit score for research routing, not a
+    forecast, a return claim, or a backtested win rate. It helps the product
+    decide which playbook is currently the most persuasive for the user's next
+    layer of analysis.
     """
 
+    data_readiness = next((item for item in skill_insights if item.category == "data_quality"), None)
+    if data_readiness and data_readiness.score < 70:
+        topic = _normalize_topic(user_question)
+        return SkillInsight(
+            skill="投资流派委员会",
+            category="committee",
+            stage="证据不足",
+            score=0,
+            conclusion="委员会拒绝裁决：市场和个股输入未通过数据就绪性审查。",
+            strategy="先补齐真实、同日期的关键来源；在此之前不选择领先流派或战法。",
+            evidence=[f"研讨问题：{topic}", f"数据状态：{data_readiness.stage}", *data_readiness.evidence[:4]],
+            risks=list(data_readiness.risks),
+            details={
+                "mode": "court",
+                "user_question": topic,
+                "judge": {"discussion_topic": topic, "verdict": "证据不足，拒绝裁决。", "action": "补齐数据后重新开庭。"},
+                "factions": [],
+                "cross_examination": [],
+                "risk_challenge": {"role": "risk_challenge", "verdict": "关键数据不充分，禁止路线比较。"},
+            },
+        )
+
     agent_scores = {item.agent: item.score for item in findings}
+    agent_details = {item.agent: item.details for item in findings}
     skills = {item.skill: item for item in skill_insights}
     topic = _normalize_topic(user_question)
-    context = _Context(agent_scores=agent_scores, skills=skills, invalid_conditions=invalid_conditions, user_question=topic)
+    context = _Context(
+        agent_scores=agent_scores,
+        agent_details=agent_details,
+        skills=skills,
+        invalid_conditions=invalid_conditions,
+        user_question=topic,
+        analysis_date=analysis_date,
+        market_signals=market_signals,
+        money_flow=money_flow,
+        intraday=intraday,
+        evidence_sources=list(evidence_sources or []),
+        quality_reports=list(quality_reports or []),
+    )
     factions = sorted(
         [
             _aggressive_hot_money(context),
@@ -55,7 +131,7 @@ def assess_investment_faction_committee(
     score_gap = winner.score - runner_up.score
     if winner.score >= 72 and score_gap >= 6:
         stage = winner.name
-        conclusion = f"当前最有说服力的是{winner.name}，胜率代理明显领先。"
+        conclusion = f"当前证据对{winner.name}的适配度明显领先。"
     elif winner.score >= 62:
         stage = f"{winner.name}/分歧"
         conclusion = f"{winner.name}暂时领先，但与{runner_up.name}分歧不大。"
@@ -65,7 +141,7 @@ def assess_investment_faction_committee(
 
     evidence = [
         f"研讨问题：{topic}",
-        f"胜率代理排名：{_rank_line(factions)}",
+        f"证据适配度排名：{_rank_line(factions)}",
         f"领先路线：{winner.name}（{winner.route}）",
         f"领先理由：{'；'.join(winner.rationale[:3])}",
         f"第二路线：{runner_up.name}（{runner_up.score}分）",
@@ -90,12 +166,21 @@ def assess_investment_faction_committee(
             "reliability": _reliability_label(winner.score, score_gap),
             "score_method": "分数 = 流派基础分 + 市场/技术/资金/题材/风险/规则约束加减分，最终限制在 0-100。",
             "score_summary": f"{winner.name} {winner.score} 分，{runner_up.name} {runner_up.score} 分，领先 {score_gap} 分。",
-            "score_warning": "分数只代表当前证据对流派路线的适配度，不代表收益概率或买卖承诺。",
+            "score_warning": "分数只代表当前证据对流派路线的适配度，不代表收益概率、胜率或买卖承诺。",
             "verdict": conclusion,
             "reason": winner.rationale[:3],
             "action": _judge_action_for_question(winner, topic, strategy),
         },
         "factions": [_faction_detail(item, item.name == winner.name, topic) for item in factions],
+        "cross_examination": _court_cross_examination(factions),
+        "risk_challenge": _risk_challenge(context, findings),
+        "signal_evidence": {name: signal.to_dict() for name, signal in context.signals.items()},
+        "decision_context": {
+            "dragon_tiger_signal": context.dragon_tiger_signal.to_dict(),
+            "northbound_days": context.northbound_days,
+            "margin_trend": context.margin_trend,
+            "tiered_money_flow": context.signal("tiered_money_flow").to_dict(),
+        },
     }
     return SkillInsight(
         skill="投资流派委员会",
@@ -113,15 +198,79 @@ def assess_investment_faction_committee(
 @dataclass(frozen=True)
 class _Context:
     agent_scores: dict[str, int]
+    agent_details: dict[str, dict[str, object]]
     skills: dict[str, SkillInsight]
     invalid_conditions: list[str]
     user_question: str
+    analysis_date: str | None
+    market_signals: AshareMarketSignals | None
+    money_flow: MoneyFlowSnapshot | None
+    intraday: IntradaySnapshot | None
+    evidence_sources: list[EvidenceSource]
+    quality_reports: list[DataQualityReport]
 
     def agent(self, name: str, default: int = 50) -> int:
         return self.agent_scores.get(name, default)
 
+    def agent_detail(self, name: str) -> dict[str, object]:
+        return self.agent_details.get(name, {})
+
     def skill(self, name: str) -> SkillInsight | None:
         return self.skills.get(name)
+
+    @property
+    def source_ids(self) -> set[str]:
+        return {item.id for item in self.evidence_sources}
+
+    def quality_status(self, dataset: str, provider: str | None = None) -> str:
+        reports = [
+            item
+            for item in self.quality_reports
+            if item.dataset == dataset and (provider is None or item.provider == provider)
+        ]
+        if not reports:
+            return "not_checked"
+        if any(item.status == "failed" for item in reports):
+            return "failed"
+        if any(item.status == "warning" for item in reports):
+            return "warning"
+        return "passed"
+
+    @property
+    def signals(self) -> dict[str, _CommitteeSignal]:
+        return {
+            "dragon_tiger": _dragon_tiger_signal(self),
+            "dragon_tiger_history": _dragon_tiger_history_signal(self),
+            "margin_financing": _margin_signal(self),
+            "northbound_holding": _northbound_signal(self),
+            "tiered_money_flow": _tiered_money_flow_signal(self),
+            "capital_flow_continuity": _capital_flow_continuity_signal(self),
+            "intraday": _intraday_signal(self),
+            "a_share_characteristics": _derived_skill_signal(
+                self, "a_share_characteristics", "A股涨停结构", "market_sentiment", "market-001"
+            ),
+            "turnover_continuity": _derived_skill_signal(
+                self, "turnover_continuity", "换手率连续变化", "daily_prices", "price-001"
+            ),
+            "ah_premium": _derived_skill_signal(
+                self, "ah_premium", "AH股溢价观察", "ah_premium", "ah-premium-001"
+            ),
+        }
+
+    def signal(self, name: str) -> _CommitteeSignal:
+        return self.signals[name]
+
+    @property
+    def dragon_tiger_signal(self) -> _CommitteeSignal:
+        return _dragon_tiger_signal(self)
+
+    @property
+    def northbound_days(self) -> int | None:
+        return _continuity_streak(self, "northbound_streak_days")
+
+    @property
+    def margin_trend(self) -> int | None:
+        return _continuity_streak(self, "margin_balance_streak_days")
 
     @property
     def risk_score(self) -> int:
@@ -158,6 +307,491 @@ class _Context:
         return min(35, len(self.invalid_conditions) * 12)
 
 
+def _dragon_tiger_signal(context: _Context) -> _CommitteeSignal:
+    quality = context.quality_status("dragon_tiger")
+    records = list(context.market_signals.dragon_tiger) if context.market_signals else []
+    if context.market_signals is not None and context.market_signals.data_status != "verified":
+        return _rejected_signal("dragon_tiger", quality, "市场扩展信号不是已核验生产数据，不进入委员会计分。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("dragon_tiger", quality, "龙虎榜语义质量未通过，不进入委员会计分。")
+    if not records:
+        return _unavailable_signal("dragon_tiger", quality, "当日没有该股票的龙虎榜披露记录。")
+    source_ids = _unique([item.source_id for item in records])
+    trade_dates = _unique([item.trade_date for item in records])
+    if not _dates_match(context.analysis_date, trade_dates) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal("dragon_tiger", quality, "龙虎榜日期未对齐或来源不可追溯。", source_ids, trade_dates[-1] if trade_dates else None)
+    net_amount = sum(item.net_buy_amount for item in records)
+    institution_values = [item.institution_net_amount for item in records if item.institution_net_amount is not None]
+    values = {"net_amount": net_amount}
+    if institution_values:
+        values["institution_net_amount"] = sum(institution_values)
+    depth = context.agent_detail("龙虎榜 Agent")
+    for key in ("buy_concentration", "sell_concentration"):
+        value = depth.get(key)
+        if isinstance(value, (int, float)):
+            values[key] = float(value)
+    seat_type_counts = depth.get("seat_type_counts")
+    if isinstance(seat_type_counts, dict):
+        for key, value in seat_type_counts.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values[f"seat_type_count:{key}"] = float(value)
+    known_hot_money_seat_count = depth.get("known_hot_money_seat_count")
+    if isinstance(known_hot_money_seat_count, (int, float)) and not isinstance(known_hot_money_seat_count, bool):
+        values["known_hot_money_seat_count"] = float(known_hot_money_seat_count)
+    return _CommitteeSignal(
+        "dragon_tiger",
+        "admitted",
+        f"龙虎榜净额 {net_amount:.0f}，机构席位净额 {values.get('institution_net_amount', '未披露')}",
+        values,
+        trade_dates[-1],
+        source_ids,
+        quality,
+        ["龙虎榜只覆盖触发披露条件的交易，不能代表全部短线资金。"],
+    )
+
+
+def _dragon_tiger_history_signal(context: _Context) -> _CommitteeSignal:
+    current_signal = context.dragon_tiger_signal
+    quality = context.quality_status("dragon_tiger_history")
+    if current_signal.status != "admitted":
+        return _unavailable_signal("dragon_tiger_history", quality, "当日龙虎榜席位证据未获准，历史后效不参与计分。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("dragon_tiger_history", quality, "龙虎榜席位历史质量未通过，不进入委员会计分。")
+    detail = context.agent_detail("龙虎榜 Agent")
+    metrics = detail.get("seat_history_metrics")
+    if not isinstance(metrics, dict):
+        return _unavailable_signal("dragon_tiger_history", quality, "缺少结构化席位历史后效。")
+    config = _committee_signal_config()["dragon_tiger_history"]
+    horizon = str(int(config["horizon_days"]))
+    minimum = int(config["minimum_observations"])
+    admitted: list[tuple[int, float]] = []
+    seat_count = 0
+    for seat_metric in metrics.values():
+        if not isinstance(seat_metric, dict) or seat_metric.get("seat_type") != "游资席位":
+            continue
+        horizons = seat_metric.get("horizons")
+        horizon_metric = horizons.get(horizon) if isinstance(horizons, dict) else None
+        if not isinstance(horizon_metric, dict):
+            continue
+        observations = horizon_metric.get("observations")
+        positive_ratio = horizon_metric.get("positive_observation_ratio")
+        if (
+            isinstance(observations, int)
+            and observations >= minimum
+            and isinstance(positive_ratio, (int, float))
+            and not isinstance(positive_ratio, bool)
+        ):
+            admitted.append((observations, float(positive_ratio)))
+            seat_count += 1
+    if not admitted:
+        return _unavailable_signal(
+            "dragon_tiger_history",
+            quality,
+            "已识别游资席位在配置观察期内没有达到最小样本要求的历史后效。",
+        )
+    observations = sum(item[0] for item in admitted)
+    positive_ratio = sum(count * ratio for count, ratio in admitted) / observations
+    source_ids = ["dragon-tiger-history-001"] if "dragon-tiger-history-001" in context.source_ids else []
+    source = next((item for item in context.evidence_sources if item.id == "dragon-tiger-history-001"), None)
+    as_of = source.as_of if source else None
+    if not source_ids or not as_of or not _date_not_after(context.analysis_date, as_of):
+        return _rejected_signal(
+            "dragon_tiger_history",
+            quality,
+            "龙虎榜席位历史来源不可追溯或观察截止日未与分析日对齐。",
+            source_ids,
+            as_of,
+        )
+    return _CommitteeSignal(
+        "dragon_tiger_history",
+        "admitted",
+        f"已识别游资席位 {seat_count} 个，{horizon}日后正收益观察占比 {positive_ratio:.0%}（席位事件 n={observations}）",
+        {
+            "seat_count": float(seat_count),
+            "horizon_days": float(horizon),
+            "observations": float(observations),
+            "positive_observation_ratio": positive_ratio,
+        },
+        as_of,
+        source_ids,
+        quality,
+        ["席位事件并非相互独立样本，历史后效是观察性证据，不代表因果、胜率或未来可复制性。"],
+    )
+
+
+def _margin_signal(context: _Context) -> _CommitteeSignal:
+    quality = context.quality_status("margin_financing")
+    record = context.market_signals.margin_financing if context.market_signals else None
+    if context.market_signals is not None and context.market_signals.data_status != "verified":
+        return _rejected_signal("margin_financing", quality, "市场扩展信号不是已核验生产数据，不进入委员会计分。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("margin_financing", quality, "融资融券语义质量未通过，不进入委员会计分。")
+    if record is None or context.money_flow is None or context.money_flow.margin_balance_change is None:
+        return _unavailable_signal("margin_financing", quality, "缺少同日融资余额活动变化。")
+    source_ids = [record.source_id]
+    if not _dates_match(context.analysis_date, [record.trade_date]) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal("margin_financing", quality, "融资融券日期未对齐或来源不可追溯。", source_ids, record.trade_date)
+    change = float(context.money_flow.margin_balance_change)
+    values = {"balance_activity_change_pct": change}
+    if record.margin_balance is not None:
+        values["margin_balance"] = float(record.margin_balance)
+    return _CommitteeSignal(
+        "margin_financing",
+        "admitted",
+        f"融资余额活动变化 {change:.2f}%",
+        values,
+        record.trade_date,
+        source_ids,
+        quality,
+        ["该指标反映当日融资买入与偿还相对余额的活动变化，不等同于多日余额趋势。"],
+    )
+
+
+def _northbound_signal(context: _Context) -> _CommitteeSignal:
+    record = context.market_signals.northbound_holding if context.market_signals else None
+    provider = "akshare" if record and "akshare" in record.source_id else "tushare"
+    quality = context.quality_status("northbound_holding", provider)
+    if context.market_signals is not None and context.market_signals.data_status != "verified":
+        return _rejected_signal("northbound_holding", quality, "市场扩展信号不是已核验生产数据，不进入委员会计分。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("northbound_holding", quality, "北向持股语义质量未通过，不进入委员会计分。")
+    if record is None or record.holding_change is None:
+        return _unavailable_signal("northbound_holding", quality, "缺少北向持股变化。")
+    source_ids = [record.source_id]
+    if not _dates_match(context.analysis_date, [record.trade_date]) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal("northbound_holding", quality, "北向持股日期未对齐或来源不可追溯。", source_ids, record.trade_date)
+    change = float(record.holding_change)
+    return _CommitteeSignal(
+        "northbound_holding",
+        "admitted",
+        f"北向持股变化 {change:.0f}",
+        {"holding_change": change},
+        record.trade_date,
+        source_ids,
+        quality,
+        ["持股数量变化未按自由流通市值标准化，只作为方向性机构证据。"],
+    )
+
+
+def _tiered_money_flow_signal(context: _Context) -> _CommitteeSignal:
+    insight = context.skill("资金流分档分析")
+    if insight is None or insight.stage in {"数据不足", "信号不足"}:
+        return _unavailable_signal("tiered_money_flow", "not_checked", "资金流分档缺失或绝对流量不足。")
+    source_ids = ["flow-001"] if "flow-001" in context.source_ids else []
+    as_of = context.money_flow.as_of if context.money_flow else None
+    if not _dates_match(context.analysis_date, [as_of] if as_of else []) or not source_ids:
+        return _rejected_signal("tiered_money_flow", "not_checked", "资金流分档日期未对齐或来源不可追溯。", source_ids, as_of)
+    values = {"score": float(insight.score)}
+    values.update({key: float(value) for key, value in insight.details.items() if isinstance(value, (int, float))})
+    return _CommitteeSignal(
+        "tiered_money_flow",
+        "admitted",
+        f"{insight.stage}，证据适配分 {insight.score}",
+        values,
+        as_of,
+        source_ids,
+        "derived",
+        list(insight.risks),
+    )
+
+
+def _capital_flow_continuity_signal(context: _Context) -> _CommitteeSignal:
+    insight = context.skill("资金流连续性分析")
+    quality = context.quality_status("capital_flow_history")
+    if insight is None or insight.stage == "数据不足":
+        return _unavailable_signal("capital_flow_continuity", quality, "多日资金历史不足，连续性信号不可用。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("capital_flow_continuity", quality, "多日资金历史质量未通过，不进入委员会计分。")
+    source_ids = [str(item) for item in insight.details.get("source_ids", [])]
+    as_of = str(insight.details.get("as_of") or "")
+    if not _dates_match(context.analysis_date, [as_of]) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal(
+            "capital_flow_continuity",
+            quality,
+            "多日资金历史日期未对齐或来源不可追溯。",
+            source_ids,
+            as_of or None,
+        )
+    values = {"score": float(insight.score)}
+    for key in ("main_streak_days", "northbound_streak_days", "margin_balance_streak_days"):
+        value = insight.details.get(key)
+        if isinstance(value, (int, float)):
+            values[key] = float(value)
+    return _CommitteeSignal(
+        "capital_flow_continuity",
+        "admitted",
+        insight.conclusion,
+        values,
+        as_of,
+        source_ids,
+        quality,
+        list(insight.risks),
+    )
+
+
+def _continuity_streak(context: _Context, key: str) -> int | None:
+    signal = _capital_flow_continuity_signal(context)
+    value = signal.values.get(key) if signal.status == "admitted" else None
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def _intraday_signal(context: _Context) -> _CommitteeSignal:
+    insight = context.skill("盘中分时盘口分析")
+    imbalance = insight.details.get("order_book_imbalance") if insight else None
+    if insight is None or context.intraday is None or insight.stage == "数据不足" or imbalance is None:
+        return _unavailable_signal("intraday", "not_checked", "缺少可用的同日盘口委托不平衡。")
+    source_ids = list(context.intraday.source_ids)
+    if not _dates_match(context.analysis_date, [context.intraday.as_of]) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal("intraday", "not_checked", "盘口日期未对齐或来源不可追溯。", source_ids, context.intraday.as_of)
+    return _CommitteeSignal(
+        "intraday",
+        "admitted",
+        f"盘口委托不平衡 {float(imbalance):.2%}，{insight.stage}",
+        {"order_book_imbalance": float(imbalance), "score": float(insight.score)},
+        context.intraday.as_of,
+        source_ids,
+        "derived",
+        list(insight.risks),
+    )
+
+
+def _derived_skill_signal(
+    context: _Context,
+    name: str,
+    skill_name: str,
+    dataset: str,
+    expected_source_id: str,
+) -> _CommitteeSignal:
+    insight = context.skill(skill_name)
+    reports = [item for item in context.quality_reports if item.dataset == dataset]
+    quality = "passed" if any(item.status == "passed" for item in reports) else context.quality_status(dataset)
+    if insight is None or insight.details.get("admitted") is not True:
+        return _unavailable_signal(name, quality, f"{skill_name}缺少可采信的同日观测。")
+    source_ids = [str(item) for item in insight.details.get("source_ids", [])]
+    as_of = str(insight.details.get("as_of") or "")
+    if expected_source_id not in source_ids:
+        return _rejected_signal(name, quality, f"{skill_name}缺少预期来源标识。", source_ids, as_of or None)
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal(name, quality, f"{skill_name}数据质量未通过，不进入委员会计分。", source_ids, as_of or None)
+    if not _dates_match(context.analysis_date, [as_of]) or not _sources_are_traceable(context, source_ids):
+        return _rejected_signal(name, quality, f"{skill_name}日期未对齐或来源不可追溯。", source_ids, as_of or None)
+    values = {"score": float(insight.score)}
+    values.update({
+        str(key): float(value)
+        for key, value in insight.details.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    })
+    return _CommitteeSignal(
+        name,
+        "admitted",
+        insight.conclusion,
+        values,
+        as_of,
+        source_ids,
+        quality,
+        list(insight.risks),
+    )
+
+
+def _committee_signal_config() -> dict[str, object]:
+    return load_runtime_settings().get("scoring", "committee_signals")
+
+
+def _dates_match(analysis_date: str | None, observed_dates: list[str]) -> bool:
+    return bool(analysis_date and observed_dates) and all(value.startswith(analysis_date) for value in observed_dates)
+
+
+def _date_not_after(analysis_date: str | None, observed_date: str) -> bool:
+    return bool(analysis_date and observed_date) and observed_date[:10] <= analysis_date
+
+
+def _sources_are_traceable(context: _Context, source_ids: list[str]) -> bool:
+    by_id = {item.id: item for item in context.evidence_sources}
+    return bool(source_ids) and all(
+        source_id in by_id
+        and context.analysis_date is not None
+        and by_id[source_id].as_of.startswith(context.analysis_date)
+        for source_id in source_ids
+    )
+
+
+def _unavailable_signal(name: str, quality: str, reason: str) -> _CommitteeSignal:
+    return _CommitteeSignal(name, "unavailable", reason, {}, None, [], quality, [reason])
+
+
+def _rejected_signal(
+    name: str,
+    quality: str,
+    reason: str,
+    source_ids: list[str] | None = None,
+    as_of: str | None = None,
+) -> _CommitteeSignal:
+    return _CommitteeSignal(name, "rejected", reason, {}, as_of, list(source_ids or []), quality, [reason])
+
+
+def _unique(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(value for value in values if value))
+
+
+def _directional_impact(value: float, magnitude: int) -> int:
+    return magnitude if value > 0 else -magnitude if value < 0 else 0
+
+
+def _continuous_impact(value: float, scale: float, maximum: int) -> int:
+    if scale <= 0:
+        return 0
+    return int(round(max(-maximum, min(maximum, value / scale * maximum))))
+
+
+def _score_signal_impact(score: float, neutral: float, span: float, maximum: int) -> int:
+    if span <= 0:
+        return 0
+    return int(round(max(-maximum, min(maximum, (score - neutral) / span * maximum))))
+
+
+def _signal_adjustment(
+    item: str,
+    signal: _CommitteeSignal,
+    impact: int,
+    reason: str,
+    threshold: str,
+) -> dict[str, object]:
+    return _score_adjustment(
+        item,
+        impact,
+        reason,
+        observed=signal.observed,
+        threshold=threshold,
+        source=f"{signal.name} typed evidence",
+        source_ids=signal.source_ids,
+        as_of=signal.as_of,
+        evidence_status=signal.status,
+    )
+
+
+def _append_signal_gap(risks: list[str], signal: _CommitteeSignal, label: str) -> None:
+    if signal.status == "rejected":
+        risks.append(f"{label}证据被质量或追溯门禁驳回：{signal.observed}")
+
+
+def _append_skill_score_adjustment(
+    context: _Context,
+    adjustments: list[dict[str, object]],
+    risks: list[str],
+    signal_name: str,
+    label: str,
+    maximum_impact_key: str,
+    reason: str,
+) -> None:
+    signal = context.signal(signal_name)
+    if signal.status != "admitted":
+        _append_signal_gap(risks, signal, label)
+        return
+    config = _committee_signal_config()[signal_name]
+    impact = _score_signal_impact(
+        signal.values["score"],
+        float(config["neutral_score"]),
+        float(config["score_span"]),
+        int(config[maximum_impact_key]),
+    )
+    adjustments.append(_signal_adjustment(
+        label,
+        signal,
+        impact,
+        reason,
+        "只采信同日、质量通过且来源可追溯的确定性 Skill；分数代表证据适配度，不是胜率。",
+    ))
+
+
+def _append_ah_premium_adjustment(
+    context: _Context,
+    adjustments: list[dict[str, object]],
+    risks: list[str],
+    maximum_impact_key: str,
+) -> None:
+    signal = context.signal("ah_premium")
+    if signal.status != "admitted":
+        _append_signal_gap(risks, signal, "AH股溢价")
+        return
+    config = _committee_signal_config()["ah_premium"]
+    premium_delta = signal.values["premium_pct"] - float(config["neutral_premium_pct"])
+    impact = _continuous_impact(
+        -premium_delta,
+        float(config["premium_scale_pct"]),
+        int(config[maximum_impact_key]),
+    )
+    adjustments.append(_signal_adjustment(
+        "AH股相对估值",
+        signal,
+        impact,
+        "A股相对H股溢价越高，跨市场相对估值约束越强；该信号只使用小权重。",
+        "溢价上升扣分、折价加分；不覆盖基本面、股东权利、流动性和汇率差异。",
+    ))
+
+
+def _append_continuity_adjustment(
+    context: _Context,
+    adjustments: list[dict[str, object]],
+    risks: list[str],
+    value_key: str,
+    label: str,
+    maximum_impact_key: str,
+    reason: str,
+) -> None:
+    signal = context.signal("capital_flow_continuity")
+    if signal.status != "admitted":
+        _append_signal_gap(risks, signal, "资金流连续性")
+        return
+    config = _committee_signal_config()["capital_flow_continuity"]
+    value = signal.values.get(value_key)
+    if not isinstance(value, (int, float)):
+        risks.append(f"{label}历史覆盖不足，未进入本流派计分。")
+        return
+    impact = _continuous_impact(float(value), float(config["streak_scale_days"]), int(config[maximum_impact_key]))
+    adjustments.append(_signal_adjustment(
+        label,
+        signal,
+        impact,
+        reason,
+        "正连续天数加分、负连续天数扣分；仅采信日期连续、来源可追溯且质量通过的历史。",
+    ))
+
+
+def _append_industry_prosperity_adjustment(
+    context: _Context,
+    adjustments: list[dict[str, object]],
+    risks: list[str],
+    maximum_impact_key: str,
+    reason: str,
+) -> None:
+    insight = context.skill("行业景气度分析")
+    if insight is None or not bool(insight.details.get("admissible")):
+        risks.append("行业景气证据不足，未进入本流派计分。")
+        return
+    source_ids = [str(item) for item in insight.details.get("source_ids", [])]
+    if not source_ids or not set(source_ids).issubset(context.source_ids):
+        risks.append("行业景气来源不可完整追溯，委员会已驳回该项证据。")
+        return
+    config = _committee_signal_config()["industry_prosperity"]
+    impact = _score_signal_impact(
+        float(insight.score),
+        float(config["neutral_score"]),
+        float(config["score_span"]),
+        int(config[maximum_impact_key]),
+    )
+    adjustments.append(_score_adjustment(
+        "行业景气度",
+        impact,
+        reason,
+        observed=f"{insight.stage}，证据适配分 {insight.score}",
+        threshold="仅采纳已通过行业资金质量门禁且来源可追溯的确定性 Skill；该分数不是胜率",
+        source="行业景气度分析 Skill",
+        source_ids=source_ids,
+        as_of=str(insight.details.get("as_of") or context.analysis_date or "unknown"),
+        evidence_status="admitted",
+    ))
+
+
 def _aggressive_hot_money(context: _Context) -> FactionView:
     base = 30
     adjustments: list[dict[str, object]] = []
@@ -171,13 +805,85 @@ def _aggressive_hot_money(context: _Context) -> FactionView:
         rationale.append(f"情绪处于{context.sentiment_stage}")
     else:
         adjustments.append(_score_adjustment("情绪周期", -18, f"情绪处于{context.sentiment_stage}，高位接力容错下降。"))
-        risks.append(f"情绪处于{context.sentiment_stage}，接力胜率下降")
+        risks.append(f"情绪处于{context.sentiment_stage}，接力容错下降")
     money_making_adj = _scaled(context.money_making_score, 60, 12)
     capital_adj = _scaled(context.agent("资金流 Agent"), 65, 10)
     theme_adj = _scaled(context.agent("题材热点 Agent"), 60, 6)
     adjustments.append(_score_adjustment("赚钱效应", money_making_adj, f"赚钱效应 {context.money_making_score} 分，决定短线资金是否愿意继续进攻。"))
     adjustments.append(_score_adjustment("资金流", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，游资派要求资金连续。"))
     adjustments.append(_score_adjustment("题材强度", theme_adj, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，题材越强接力越有共识。"))
+    signal_config = _committee_signal_config()
+    _append_continuity_adjustment(
+        context, adjustments, risks, "main_streak_days", "主力资金连续性",
+        "aggressive_main_max_impact", "主力净流入连续天数用于质证单日龙虎榜和分档资金是否获得延续。",
+    )
+    _append_skill_score_adjustment(context, adjustments, risks, "a_share_characteristics", "涨停结构", "aggressive_max_impact", "封板率、一字板和连板梯队共同质证短线情绪承接。")
+    _append_skill_score_adjustment(context, adjustments, risks, "turnover_continuity", "换手连续性", "aggressive_max_impact", "多日换手变化用于区分资金活跃度延续与单日噪音。")
+    dragon = context.dragon_tiger_signal
+    if dragon.status == "admitted":
+        impact = _directional_impact(
+            dragon.values["net_amount"],
+            int(signal_config["dragon_tiger"]["aggressive_direction_impact"]),
+        )
+        adjustments.append(_signal_adjustment("龙虎榜净额", dragon, impact, "龙虎榜公开净额只作为当日短线承接的方向性佐证。", "净买入加分、净卖出扣分；不据此识别具体游资身份"))
+        concentration = max(dragon.values.get("buy_concentration", 0.0), dragon.values.get("sell_concentration", 0.0))
+        depth_config = load_runtime_settings().get("domain_knowledge", "dragon_tiger_depth")
+        if concentration >= float(depth_config["high_concentration_ratio"]):
+            adjustments.append(_signal_adjustment(
+                "龙虎榜席位集中度",
+                dragon,
+                -int(depth_config["concentration_risk_penalty"]),
+                f"披露席位集中度 {concentration:.1%}，少数席位反向交易可能放大兑现波动。",
+                "集中度只作流动性与兑现风险扣分，不推断席位操纵意图",
+            ))
+        hot_money_count = dragon.values.get("known_hot_money_seat_count", 0.0)
+        if hot_money_count > 0:
+            type_config = signal_config["dragon_tiger"]
+            seat_impact = min(
+                int(type_config["identified_hot_money_max_impact"]),
+                int(round(hot_money_count * float(type_config["identified_hot_money_seat_impact"]))),
+            )
+            adjustments.append(_signal_adjustment(
+                "龙虎榜席位类型",
+                dragon,
+                seat_impact,
+                f"配置名录精确识别到 {int(hot_money_count)} 个游资席位，作为短线风格匹配证据。",
+                "只有配置的可追溯精确席位名录可加分；普通券商营业部不推断为游资",
+            ))
+        rationale.append(dragon.observed)
+    else:
+        _append_signal_gap(risks, dragon, "龙虎榜")
+    dragon_history = context.signal("dragon_tiger_history")
+    if dragon_history.status == "admitted":
+        config = signal_config["dragon_tiger_history"]
+        impact = _continuous_impact(
+            dragon_history.values["positive_observation_ratio"] - float(config["neutral_positive_ratio"]),
+            float(config["positive_ratio_scale"]),
+            int(config["aggressive_max_impact"]),
+        )
+        adjustments.append(_signal_adjustment(
+            "龙虎榜游资席位历史后效",
+            dragon_history,
+            impact,
+            "已识别游资席位的历史后效只用于质证当前短线风格是否有观察性支持。",
+            "达到最小席位事件样本后才参与；正收益观察占比不是胜率，不代表因果",
+        ))
+    elif dragon_history.status == "rejected":
+        _append_signal_gap(risks, dragon_history, "龙虎榜席位历史")
+    tiered = context.signal("tiered_money_flow")
+    if tiered.status == "admitted":
+        config = signal_config["tiered_money_flow"]
+        impact = _score_signal_impact(tiered.values["score"], float(config["neutral_score"]), float(config["score_span"]), int(config["aggressive_max_impact"]))
+        adjustments.append(_signal_adjustment("资金流分档", tiered, impact, "大额与中小额订单的方向关系用于质证短线资金连续性。", "仅采信同日完整四档数据；不推断交易主体身份"))
+    else:
+        _append_signal_gap(risks, tiered, "资金流分档")
+    intraday = context.signal("intraday")
+    if intraday.status == "admitted":
+        config = signal_config["intraday"]
+        impact = _continuous_impact(intraday.values["order_book_imbalance"], float(config["imbalance_scale"]), int(config["aggressive_max_impact"]))
+        adjustments.append(_signal_adjustment("盘口委托不平衡", intraday, impact, "盘口不平衡只用于验证当日承接，撤单风险保留为反证。", "买方不平衡加分、卖方不平衡扣分；必须与成交和 VWAP 交叉验证"))
+    else:
+        _append_signal_gap(risks, intraday, "盘口")
     if context.theme_stage in {"启动", "扩散"}:
         adjustments.append(_score_adjustment("题材阶段", 6, f"题材处于{context.theme_stage}，仍有扩散空间。"))
         rationale.append(f"题材处于{context.theme_stage}")
@@ -204,6 +910,35 @@ def _trend_capacity(context: _Context) -> FactionView:
     adjustments.append(_score_adjustment("技术趋势", technical_adj, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，趋势派最看重趋势确认。"))
     adjustments.append(_score_adjustment("资金承接", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，决定趋势能否延续。"))
     adjustments.append(_score_adjustment("风险质量", risk_adj, f"风险扫描 {context.risk_score} 分，风险越低越能承载趋势仓位。"))
+    signal_config = _committee_signal_config()
+    _append_continuity_adjustment(
+        context, adjustments, risks, "margin_balance_streak_days", "融资余额趋势",
+        "trend_margin_max_impact", "融资余额连续变化方向用于验证杠杆资金是否持续配合趋势。",
+    )
+    _append_skill_score_adjustment(context, adjustments, risks, "turnover_continuity", "换手连续性", "trend_max_impact", "换手连续变化用于质证趋势是否获得持续参与。")
+    _append_skill_score_adjustment(context, adjustments, risks, "a_share_characteristics", "涨停结构", "trend_max_impact", "市场封板结构只作为趋势风险偏好的低权重旁证。")
+    margin = context.signal("margin_financing")
+    if margin.status == "admitted":
+        config = signal_config["margin_financing"]
+        impact = _continuous_impact(margin.values["balance_activity_change_pct"], float(config["scale_pct"]), int(config["trend_max_impact"]))
+        adjustments.append(_signal_adjustment("融资融券活动", margin, impact, "融资活动变化用于检验杠杆资金是否配合趋势。", "正向活动加分、负向活动扣分；不外推为多日余额趋势"))
+        rationale.append(margin.observed)
+    else:
+        _append_signal_gap(risks, margin, "融资融券")
+    tiered = context.signal("tiered_money_flow")
+    if tiered.status == "admitted":
+        config = signal_config["tiered_money_flow"]
+        impact = _score_signal_impact(tiered.values["score"], float(config["neutral_score"]), float(config["score_span"]), int(config["trend_max_impact"]))
+        adjustments.append(_signal_adjustment("资金流分档", tiered, impact, "分档资金方向用于验证趋势承接是否集中在大额订单。", "完整四档且绝对流量过门槛后才参与"))
+    else:
+        _append_signal_gap(risks, tiered, "资金流分档")
+    intraday = context.signal("intraday")
+    if intraday.status == "admitted":
+        config = signal_config["intraday"]
+        impact = _continuous_impact(intraday.values["order_book_imbalance"], float(config["imbalance_scale"]), int(config["trend_max_impact"]))
+        adjustments.append(_signal_adjustment("盘口趋势确认", intraday, impact, "同日盘口承接用于质证趋势是否获得即时确认。", "委托不平衡必须与 VWAP、成交量同向才具有解释力"))
+    else:
+        _append_signal_gap(risks, intraday, "盘口")
     if context.theme_stage in {"启动", "扩散"}:
         adjustments.append(_score_adjustment("题材阶段", 9, f"题材处于{context.theme_stage}，对趋势延续有加成。"))
         rationale.append(f"题材处于{context.theme_stage}")
@@ -229,6 +964,46 @@ def _institutional_growth(context: _Context) -> FactionView:
     adjustments.append(_score_adjustment("基本面质量", fundamental_adj, f"基本面 Agent {context.agent('基本面 Agent')} 分，成长派要求盈利和预期证据。"))
     adjustments.append(_score_adjustment("风险过滤", risk_adj, f"风险扫描 {context.risk_score} 分，机构成长不接受明显硬风险。"))
     adjustments.append(_score_adjustment("趋势配合", technical_adj, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，用于判断资金是否认可成长逻辑。"))
+    _append_industry_prosperity_adjustment(
+        context,
+        adjustments,
+        risks,
+        "institution_max_impact",
+        "行业资金、估值和盈利增速差用于质证景气成长是否具有行业基础。",
+    )
+    signal_config = _committee_signal_config()
+    _append_continuity_adjustment(
+        context, adjustments, risks, "northbound_streak_days", "北向资金连续性",
+        "institution_northbound_max_impact", "北向持股连续增减天数用于验证机构风格资金是否持续。",
+    )
+    _append_ah_premium_adjustment(context, adjustments, risks, "institution_max_impact")
+    northbound = context.signal("northbound_holding")
+    if northbound.status == "admitted":
+        impact = _directional_impact(northbound.values["holding_change"], int(signal_config["northbound_holding"]["institution_direction_impact"]))
+        adjustments.append(_signal_adjustment("北向持股变化", northbound, impact, "北向持股方向作为机构风格的观察性佐证，不替代基本面。", "持股增加加分、减少扣分；数量未标准化时仅使用方向"))
+        rationale.append(northbound.observed)
+    else:
+        _append_signal_gap(risks, northbound, "北向持股")
+    margin = context.signal("margin_financing")
+    if margin.status == "admitted":
+        config = signal_config["margin_financing"]
+        impact = _continuous_impact(margin.values["balance_activity_change_pct"], float(config["scale_pct"]), int(config["institution_max_impact"]))
+        adjustments.append(_signal_adjustment("融资融券活动", margin, impact, "融资活动用于观察增量风险偏好是否配合成长逻辑。", "正向活动加分、负向活动扣分；只代表同日活动"))
+    else:
+        _append_signal_gap(risks, margin, "融资融券")
+    dragon = context.signal("dragon_tiger")
+    if dragon.status == "admitted" and "institution_net_amount" in dragon.values:
+        impact = _directional_impact(dragon.values["institution_net_amount"], int(signal_config["dragon_tiger"]["institution_direction_impact"]))
+        adjustments.append(_signal_adjustment("龙虎榜机构席位", dragon, impact, "公开机构席位净额仅作为当日机构交易线索。", "机构席位净买入加分、净卖出扣分；单日披露不代表中期持仓"))
+    elif dragon.status == "rejected":
+        _append_signal_gap(risks, dragon, "龙虎榜机构席位")
+    tiered = context.signal("tiered_money_flow")
+    if tiered.status == "admitted":
+        config = signal_config["tiered_money_flow"]
+        impact = _score_signal_impact(tiered.values["score"], float(config["neutral_score"]), float(config["score_span"]), int(config["institution_max_impact"]))
+        adjustments.append(_signal_adjustment("资金流分档", tiered, impact, "订单规模分布用于质证资金承接，不据此认定机构身份。", "完整四档数据才参与，影响低于基本面和风险过滤"))
+    else:
+        _append_signal_gap(risks, tiered, "资金流分档")
     if context.theme_stage == "高潮":
         adjustments.append(_score_adjustment("题材拥挤", -8, "题材高潮会放大估值兑现风险。"))
         risks.append("题材高潮会放大估值兑现风险")
@@ -252,6 +1027,22 @@ def _value_dividend(context: _Context) -> FactionView:
     risk_adj = _scaled(context.risk_score, 70, 20)
     adjustments.append(_score_adjustment("基本面安全垫", fundamental_adj, f"基本面 Agent {context.agent('基本面 Agent')} 分，价值派要求利润和现金流能支撑估值。"))
     adjustments.append(_score_adjustment("风控质量", risk_adj, f"风险扫描 {context.risk_score} 分，风险越低越符合价值持有。"))
+    _append_industry_prosperity_adjustment(
+        context,
+        adjustments,
+        risks,
+        "value_max_impact",
+        "行业估值分位和盈利增速差用于区分安全边际与价值陷阱。",
+    )
+    _append_ah_premium_adjustment(context, adjustments, risks, "value_max_impact")
+    northbound = context.signal("northbound_holding")
+    if northbound.status == "admitted":
+        config = _committee_signal_config()["northbound_holding"]
+        impact = _directional_impact(northbound.values["holding_change"], int(config["value_direction_impact"]))
+        adjustments.append(_signal_adjustment("北向持股变化", northbound, impact, "北向持股方向只作为价值风格关注度的次级证据。", "方向性小权重；不能覆盖估值、现金流和公司治理证据"))
+        rationale.append(northbound.observed)
+    else:
+        _append_signal_gap(risks, northbound, "北向持股")
     if context.agent("技术分析 Agent") < 45:
         adjustments.append(_score_adjustment("趋势陷阱", -10, f"技术分析 Agent {context.agent('技术分析 Agent')} 分，趋势过弱需防价值陷阱。"))
         risks.append("趋势过弱，需防范价值陷阱")
@@ -278,6 +1069,13 @@ def _policy_cycle(context: _Context) -> FactionView:
     adjustments.append(_score_adjustment("政策/题材强度", theme_adj, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，政策派看主线共识。"))
     adjustments.append(_score_adjustment("市场温度", market_adj, f"市场温度 {context.market_temperature} 分，决定政策线能否扩散。"))
     adjustments.append(_score_adjustment("资金扩散", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，用于验证政策线是否有真实资金承接。"))
+    _append_industry_prosperity_adjustment(
+        context,
+        adjustments,
+        risks,
+        "policy_max_impact",
+        "产业链节点资金传导用于质证政策主题是否扩散到真实行业环节。",
+    )
     if context.sentiment_stage == "退潮":
         adjustments.append(_score_adjustment("情绪退潮", -12, "退潮期政策线也容易高开低走。"))
         risks.append("退潮期政策线也容易高开低走")
@@ -319,6 +1117,17 @@ def _reversal_low_absorption(context: _Context) -> FactionView:
         risks.append("主力行为偏派发")
     risk_adj = _scaled(context.risk_score, 65, 12)
     adjustments.append(_score_adjustment("风险质量", risk_adj, f"风险扫描 {context.risk_score} 分，低吸必须先排除硬风险。"))
+    intraday = context.signal("intraday")
+    if intraday.status == "admitted":
+        config = _committee_signal_config()["intraday"]
+        impact = _continuous_impact(intraday.values["order_book_imbalance"], float(config["imbalance_scale"]), int(config["reversal_max_impact"]))
+        adjustments.append(_signal_adjustment("盘口承接确认", intraday, impact, "低吸反转需要买方承接确认，卖方不平衡构成反证。", "买方不平衡加分、卖方不平衡扣分；委托可撤销"))
+        if impact > 0:
+            rationale.append(intraday.observed)
+        elif impact < 0:
+            risks.append("盘口卖方压力未支持反转确认")
+    else:
+        _append_signal_gap(risks, intraday, "盘口")
     if context.invalid_penalty:
         penalty = min(22, context.invalid_penalty)
         adjustments.append(_score_adjustment("规则约束", -penalty, f"存在 {len(context.invalid_conditions)} 项否决/降级条件，低吸派降权。"))
@@ -361,6 +1170,9 @@ def _score_adjustment(
     observed: str | None = None,
     threshold: str | None = None,
     source: str | None = None,
+    source_ids: list[str] | None = None,
+    as_of: str | None = None,
+    evidence_status: str = "admitted",
 ) -> dict[str, object]:
     return {
         "item": item,
@@ -369,6 +1181,9 @@ def _score_adjustment(
         "observed": observed or _infer_observed(reason),
         "threshold": threshold or _threshold_for_item(item),
         "source": source or _source_for_item(item),
+        "source_ids": list(source_ids or []),
+        "as_of": as_of,
+        "evidence_status": evidence_status,
         "reason": reason,
     }
 
@@ -499,7 +1314,50 @@ def _faction_detail(faction: FactionView, winner: bool, topic: str) -> dict[str,
         "risks": faction.risks,
         "recommendation": _recommendation_for_faction(faction),
         "question_response": _question_response(faction, topic),
+        "cross_examination": _faction_cross_examination(faction),
         "winner": winner,
+    }
+
+
+def _faction_cross_examination(faction: FactionView) -> dict[str, list[str]]:
+    supports = _adjustment_lines(faction, positive=True)
+    challenges = _adjustment_lines(faction, positive=False)
+    return {
+        "claim": supports[:2] or ["未形成足够强的支持证据。"],
+        "challenge": challenges[:2] or faction.risks[:2] or ["尚无明确硬性反证，仍需补充实时证据。"],
+        "invalidation": _playbook_template(faction.name)["invalid_if"],
+    }
+
+
+def _court_cross_examination(factions: list[FactionView]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for faction in factions:
+        cross = _faction_cross_examination(faction)
+        rows.append(
+            {
+                "route": faction.name,
+                "claim": cross["claim"],
+                "challenge": cross["challenge"],
+                "invalidation": cross["invalidation"],
+            }
+        )
+    return rows
+
+
+def _risk_challenge(context: _Context, findings: list[AgentFinding]) -> dict[str, object]:
+    evidence_quality = next((item for item in context.skills.values() if item.category == "quality"), None)
+    missing_boundaries = [item.agent for item in findings if not item.invalidation_conditions]
+    return {
+        "role": "risk_challenge",
+        "rule_constraints": list(context.invalid_conditions),
+        "evidence_quality": evidence_quality.score if evidence_quality else None,
+        "evidence_risks": evidence_quality.risks if evidence_quality else [],
+        "missing_invalidation_boundaries": missing_boundaries,
+        "verdict": (
+            "存在规则约束或证据边界缺失，法官只能给出观察性路线结论。"
+            if context.invalid_conditions or missing_boundaries or (evidence_quality and evidence_quality.score < 70)
+            else "未发现证据链硬缺口，但路线结论仍须随新公告、资金和市场状态复核。"
+        ),
     }
 
 

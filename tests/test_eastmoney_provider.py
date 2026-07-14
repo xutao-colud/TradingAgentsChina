@@ -29,10 +29,13 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(profile.name, "京东方A")
         self.assertEqual(profile.industry, "光学光电子")
         self.assertEqual(profile.board, "main")
+        self.assertEqual(profile.concepts, ["物联网", "OLED", "人工智能"])
+        self.assertEqual(profile.concept_source_id, "profile-concept-001")
         self.assertEqual(prices[-1].close, 7.59)
         self.assertEqual(prices[-1].turnover_rate, 10.76)
         self.assertEqual(flow.main_net_inflow, -5088655104.0)
         self.assertEqual(sources[0].source_type, "eastmoney_push2his")
+        self.assertTrue(any(source.id == "profile-concept-001" for source in sources))
 
     def test_workflow_no_longer_uses_offline_sample_price_for_known_symbol(self) -> None:
         responses = [QUOTE_PAYLOAD, FLOW_PAYLOAD]
@@ -61,7 +64,7 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(flow.main_net_inflow, -5088655104.0)
         self.assertEqual(sources[1].source_type, "eastmoney_push2his")
 
-    def test_money_flow_falls_back_without_crashing_when_public_provider_fails(self) -> None:
+    def test_money_flow_failure_does_not_fall_back_to_sample_data(self) -> None:
         responses = ["not-json"]
 
         def fetch_text(url: str) -> str:
@@ -77,8 +80,10 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         flow = provider.get_money_flow("000725.SZ", "2026-07-10")
         sources = provider.get_evidence_sources("000725.SZ", "2026-07-10")
 
-        self.assertEqual(flow.main_net_inflow, 8000000)
-        self.assertEqual(sources[1].source_type, "offline_sample")
+        self.assertIsNone(flow.main_net_inflow)
+        self.assertIsNone(flow.super_large_net_inflow)
+        self.assertEqual(sources[1].source_type, "unavailable")
+        self.assertNotEqual(sources[1].source_type, "offline_sample")
 
     def test_daily_price_uses_snapshot_not_offline_sample_when_kline_fails(self) -> None:
         responses = [QUOTE_PAYLOAD, FLOW_PAYLOAD]
@@ -93,6 +98,31 @@ class EastmoneyRealtimeMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(prices[-1].close, 7.59)
         self.assertFalse(any(price.close == 14.35 for price in prices))
         self.assertEqual(sources[0].source_type, "eastmoney_snapshot")
+
+    def test_snapshot_is_not_relabelled_as_a_different_historical_date(self) -> None:
+        responses = [QUOTE_PAYLOAD, FLOW_PAYLOAD]
+        provider = EastmoneyRealtimeMarketDataProvider(
+            snapshot_client=EastmoneyStockSnapshotClient(fetch_text=lambda url: responses.pop(0), now=lambda: datetime(2026, 7, 13, 10, 0, 0)),
+            fetch_text=lambda url: "not-json",
+        )
+
+        prices = provider.get_daily_prices("000725.SZ", "2026-07-09", lookback_days=30)
+        sources = provider.get_evidence_sources("000725.SZ", "2026-07-09")
+
+        self.assertEqual(prices, [])
+        self.assertEqual(sources[0].source_type, "unavailable")
+
+    def test_short_snapshot_history_forces_report_to_data_insufficient(self) -> None:
+        responses = [QUOTE_PAYLOAD, FLOW_PAYLOAD]
+        provider = EastmoneyRealtimeMarketDataProvider(
+            snapshot_client=EastmoneyStockSnapshotClient(fetch_text=lambda url: responses.pop(0), now=lambda: datetime(2026, 7, 13, 10, 0, 0)),
+            fetch_text=lambda url: "not-json",
+        )
+
+        report = AShareResearchWorkflow(provider).run("000725.SZ", "2026-07-10")
+
+        self.assertEqual(report.data_status, "数据不足")
+        self.assertEqual(report.conclusion, "证据不足")
 
 
 if __name__ == "__main__":

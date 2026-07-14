@@ -8,6 +8,27 @@ from app.data.providers.sample_provider import SampleMarketDataProvider
 
 
 class WorkflowTest(unittest.TestCase):
+    def test_workflow_requests_configured_long_cycle_history(self) -> None:
+        class RecordingProvider(SampleMarketDataProvider):
+            requested_lookback_days = 0
+
+            def get_daily_prices(self, symbol: str, analysis_date: str, lookback_days: int) -> list[DailyPrice]:
+                self.requested_lookback_days = lookback_days
+                return super().get_daily_prices(symbol, analysis_date, lookback_days)
+
+        from app.config.runtime import load_runtime_settings
+        from app.graph.workflow import AShareResearchWorkflow
+
+        provider = RecordingProvider()
+        report = AShareResearchWorkflow(provider).run("600519", "2026-07-10")
+
+        self.assertEqual(
+            provider.requested_lookback_days,
+            load_runtime_settings().get("domain_knowledge", "technical", "history_bars"),
+        )
+        technical = next(item for item in report.agent_findings if item.agent == "技术分析 Agent")
+        self.assertTrue(any("MA60/MA120" in item and "数据不足" not in item for item in technical.evidence))
+
     def test_workflow_builds_traceable_report(self) -> None:
         report = build_default_workflow().run("600519", "2026-07-10")
         self.assertEqual(report.symbol, "600519.SH")
@@ -17,7 +38,16 @@ class WorkflowTest(unittest.TestCase):
         self.assertGreater(len(report.agent_findings), 4)
         self.assertGreaterEqual(len(report.skill_insights), 8)
         self.assertGreater(len(report.evidence_sources), 3)
-        self.assertIn(report.conclusion, {"强烈关注", "谨慎关注", "中性观察", "风险较高", "暂不参与"})
+        self.assertEqual(report.data_status, "样例数据")
+        self.assertEqual(report.conclusion, "证据不足")
+        readiness = next(item for item in report.skill_insights if item.category == "data_quality")
+        self.assertEqual(readiness.stage, "样例数据")
+        self.assertEqual(readiness.details["required_daily_price_count"], 120)
+        industry = next(item for item in report.skill_insights if item.skill == "行业景气度分析")
+        self.assertTrue(industry.details["admissible"])
+        self.assertIn("rank", industry.details["flow"])
+        self.assertIn("counter_evidence", industry.details)
+        self.assertIn("invalidation_conditions", industry.details)
 
     def test_sample_provider_resolves_known_a_share_names(self) -> None:
         report = build_default_workflow().run("000725.SZ", "2026-07-10")
@@ -61,7 +91,7 @@ class WorkflowTest(unittest.TestCase):
 
         report = AShareResearchWorkflow(RiskyProvider()).run("600000", "2026-07-10")
         self.assertTrue(report.invalid_conditions)
-        self.assertIn(report.risk_level, {"中", "高"})
+        self.assertEqual(report.risk_level, "未知")
         self.assertNotEqual(report.conclusion, "强烈关注")
 
 
@@ -73,6 +103,24 @@ class WorkflowTest(unittest.TestCase):
         )
         alignment = next(item for item in report.skill_insights if item.category == "personalization")
         self.assertEqual(alignment.skill, "个人交易画像适配")
+
+    def test_market_gate_precedes_and_can_exclude_active_playbook(self) -> None:
+        class RetreatProvider(SampleMarketDataProvider):
+            def get_market_context(self, analysis_date: str):
+                context = super().get_market_context(analysis_date)
+                return type(context)(
+                    **{**context.__dict__, "hot_money_cycle": "退潮", "limit_up_count": 10, "limit_down_count": 45, "advancers": 800, "decliners": 4200}
+                )
+
+        from app.graph.workflow import AShareResearchWorkflow
+
+        report = AShareResearchWorkflow(RetreatProvider()).run(
+            "600519", "2026-07-10", TradingProfile(active_playbook="hot_money_leader")
+        )
+        gate = next(item for item in report.skill_insights if item.category == "strategy_selection")
+        playbook = next(item for item in report.skill_insights if item.category == "playbook")
+        self.assertEqual(gate.stage, "数据不足")
+        self.assertEqual(playbook.stage, "数据不足")
 
 
 if __name__ == "__main__":

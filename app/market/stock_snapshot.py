@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable
@@ -11,11 +12,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.market.realtime import RealtimeQuote
+from app.config.runtime import load_runtime_settings
 from app.rules.trading_rules import normalize_symbol
 
 
-EASTMONEY_STOCK_URL = "https://push2.eastmoney.com/api/qt/stock/get"
-EASTMONEY_FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 FetchText = Callable[[str], str]
 
 
@@ -91,7 +91,16 @@ class EastmoneyStockSnapshotClient:
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, StockRealtimeSnapshot]:
         normalized = [normalize_symbol(symbol) for symbol in symbols]
-        return {symbol: self.fetch_snapshot(symbol) for symbol in dict.fromkeys(normalized)}
+        unique_symbols = list(dict.fromkeys(normalized))
+        if not unique_symbols:
+            return {}
+        # A watchlist refresh needs two public requests per symbol. Bounded
+        # concurrency keeps the local dashboard responsive without turning a
+        # refresh into an unbounded burst against the public provider.
+        workers = min(load_runtime_settings().get("runtime", "snapshot_max_workers"), len(unique_symbols))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stock-snapshot") as executor:
+            snapshots = list(executor.map(self.fetch_snapshot, unique_symbols))
+        return dict(zip(unique_symbols, snapshots))
 
     def fetch_snapshot(self, symbol: str) -> StockRealtimeSnapshot:
         normalized = normalize_symbol(symbol)
@@ -140,7 +149,7 @@ def _quote_url(symbol: str) -> str:
         "secid": _secid(symbol),
         "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f116,f117,f127,f128,f129,f168,f170",
     }
-    return EASTMONEY_STOCK_URL + "?" + urlencode(params, safe=",:+")
+    return load_runtime_settings().get("providers", "eastmoney", "stock_url") + "?" + urlencode(params, safe=",:+")
 
 
 def _flow_url(symbol: str) -> str:
@@ -151,7 +160,7 @@ def _flow_url(symbol: str) -> str:
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63",
     }
-    return EASTMONEY_FLOW_URL + "?" + urlencode(params, safe=",:+")
+    return load_runtime_settings().get("providers", "eastmoney", "flow_url") + "?" + urlencode(params, safe=",:+")
 
 
 def _secid(symbol: str) -> str:
@@ -220,18 +229,12 @@ def _unavailable_snapshot(symbol: str, error: str, now: datetime) -> StockRealti
 
 
 def _fetch_text(url: str) -> str:
-    if not (url.startswith(EASTMONEY_STOCK_URL) or url.startswith(EASTMONEY_FLOW_URL)):
+    endpoints = load_runtime_settings().get("providers", "eastmoney")
+    if not (url.startswith(endpoints["stock_url"]) or url.startswith(endpoints["flow_url"])):
         raise ValueError("Blocked stock snapshot URL")
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1",
-            "Accept": "application/json,text/plain,*/*",
-            "Referer": "https://quote.eastmoney.com/",
-        },
-    )
+    request = Request(url, headers=endpoints["headers"])
     try:
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=load_runtime_settings().get("runtime", "network_timeout_seconds")) as response:
             body = response.read().decode("utf-8", errors="replace")
             if not body.strip():
                 raise OSError("provider returned empty body")
@@ -244,21 +247,20 @@ def _fetch_text_with_curl(url: str) -> str:
     curl = shutil.which("curl")
     if not curl:
         raise OSError("curl is unavailable and Python HTTP request failed")
+    headers = load_runtime_settings().get("providers", "eastmoney", "headers")
+    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
     completed = subprocess.run(
         [
             curl,
             "--http1.1",
             "-sS",
-            "-H",
-            "User-Agent: TradingAgentsChina/0.1",
-            "-H",
-            "Referer: https://quote.eastmoney.com/",
+            *curl_headers,
             url,
         ],
         capture_output=True,
         check=False,
         text=True,
-        timeout=8,
+        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
     )
     if completed.returncode != 0 or not completed.stdout.strip():
         raise OSError((completed.stderr or "curl returned no data").strip())

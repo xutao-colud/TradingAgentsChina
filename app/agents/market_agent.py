@@ -1,19 +1,46 @@
 from __future__ import annotations
 
 from app.agents.common import clamp_score, confidence_from_score
+from app.config.runtime import load_runtime_settings
 from app.schemas.report import AgentFinding, MarketContext
 
 
 def analyze_market(context: MarketContext) -> AgentFinding:
-    breadth = context.advancers / max(1, context.advancers + context.decliners)
-    score = 50 + context.index_change_pct * 12 + (breadth - 0.5) * 60
-    score += min(12, context.limit_up_count / 8)
-    score -= min(12, context.limit_down_count / 3)
+    required = {
+        "index_change_pct": context.index_change_pct,
+        "total_amount": context.total_amount,
+        "advancers": context.advancers,
+        "decliners": context.decliners,
+        "limit_up_count": context.limit_up_count,
+        "limit_down_count": context.limit_down_count,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing or context.data_status != "verified":
+        return AgentFinding(
+            agent="市场周期 Agent",
+            conclusion="市场状态数据不足，不能选择战法",
+            score=load_runtime_settings().get("scoring", "data_readiness", "insufficient_score"),
+            confidence=0.0,
+            evidence=[f"缺失字段：{', '.join(missing) if missing else '无'}", f"市场数据状态：{context.data_status}"],
+            risks=list(context.unavailable_reasons) or ["不得把缺失市场数据解释为零值或情绪冰点。"],
+            counterpoints=["单一指数数据不能替代全市场宽度和涨跌停统计。"],
+            invalidation_conditions=["补齐同一交易日的市场宽度、涨跌停池及连续情绪历史后重新判断。"],
+            source_ids=[],
+        )
+
+    advancers = int(context.advancers)
+    decliners = int(context.decliners)
+    breadth = advancers / max(1, advancers + decliners)
+    config = load_runtime_settings().get("scoring", "market")
+    neutral = load_runtime_settings().get("scoring", "score_bounds", "neutral")
+    score = neutral + float(context.index_change_pct) * config["index_weight"] + (breadth - 0.5) * config["breadth_weight"]
+    score += min(config["limit_up_cap"], int(context.limit_up_count) / config["limit_up_divisor"])
+    score -= min(config["limit_down_cap"], int(context.limit_down_count) / config["limit_down_divisor"])
     final_score = clamp_score(score)
-    conclusion = "市场情绪弱修复" if final_score >= 60 else "市场环境偏谨慎"
-    if final_score >= 72:
+    conclusion = "市场情绪弱修复" if final_score >= config["repair_threshold"] else "市场环境偏谨慎"
+    if final_score >= config["positive_threshold"]:
         conclusion = "市场环境偏积极"
-    elif final_score <= 42:
+    elif final_score <= config["weak_threshold"]:
         conclusion = "市场情绪偏弱"
     return AgentFinding(
         agent="市场周期 Agent",
@@ -21,13 +48,19 @@ def analyze_market(context: MarketContext) -> AgentFinding:
         score=final_score,
         confidence=confidence_from_score(final_score),
         evidence=[
-            f"{context.index_name}涨跌幅 {context.index_change_pct:.2f}%",
+            f"{context.index_name}涨跌幅 {float(context.index_change_pct):.2f}%",
             f"上涨/下跌家数 {context.advancers}/{context.decliners}",
             f"涨停 {context.limit_up_count} 家，跌停 {context.limit_down_count} 家",
-            f"游资情绪周期：{context.hot_money_cycle}",
+            f"封板率 {context.sealed_limit_up_rate:.1f}%，一字板 {context.one_price_limit_up_count} 家，连板梯队 {context.board_ladder}" if context.sealed_limit_up_rate is not None else "涨停结构数据不足",
+            f"动态游资情绪周期：{context.hot_money_cycle}",
+            f"数据时间：{context.as_of}",
         ],
-        risks=["若成交额继续萎缩，修复可能转为弱反弹。"] if context.total_amount < 800_000_000_000 else [],
-        counterpoints=["单日市场情绪不能代表中期趋势。"],
+        risks=(
+            ["若成交额继续萎缩，修复可能转为弱反弹。"]
+            if float(context.total_amount) < config["low_amount"]
+            else ["市场广度可能被少数权重股扭曲，需与成交额和涨跌停反馈交叉核验。"]
+        ) + list(context.unavailable_reasons),
+        counterpoints=["单日市场状态不能代表中期趋势。"],
+        invalidation_conditions=["上涨家数转弱且跌停数量连续增加。", "成交额持续低于近期均值，风险偏好未获确认。"],
         source_ids=["market-001"],
     )
-

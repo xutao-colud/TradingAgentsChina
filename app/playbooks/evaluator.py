@@ -22,6 +22,7 @@ def assess_active_playbook(
     money_making = by_skill.get("赚钱效应分析")
     theme = by_skill.get("热点生命周期分析")
     risk = by_skill.get("A股风险扫描器")
+    market_gate = next((item for item in insights if item.category == "strategy_selection"), None)
 
     score = 50
     evidence = [f"当前原型：{playbook.name}（{playbook.group}）", f"研究周期：{playbook.horizon}"]
@@ -36,8 +37,23 @@ def assess_active_playbook(
     else:
         score, evidence, risks = _value_score(score, evidence, risks, fundamental, technical, theme, risk)
 
+    if market_gate:
+        allowed_playbooks = market_gate.details.get("allowed_playbooks", [])
+        if playbook.id not in allowed_playbooks:
+            score = min(score, 45)
+            risks.append(f"市场状态策略门槛为“{market_gate.stage}”，当前原型不在允许研究路线中。")
+            evidence.append(f"市场状态策略门槛：{market_gate.stage}")
+
     score = max(0, min(100, score))
-    if score >= 72:
+    if market_gate and market_gate.stage == "数据不足":
+        stage = "数据不足"
+        conclusion = f"关键数据未通过审查，暂不评估{playbook.name}与当前市场的适配度。"
+        strategy = "补齐真实、同日期的关键来源后，再将用户画像与战法规则用于比较。"
+    elif market_gate and playbook.id not in market_gate.details.get("allowed_playbooks", []):
+        stage = "市场不适配"
+        conclusion = f"当前市场状态不支持按{playbook.name}推进研究；用户偏好不能覆盖市场风险门槛。"
+        strategy = "保留用户画像用于后续匹配，先等待市场门槛重新开放该研究路线。"
+    elif score >= 72:
         stage = "适配"
         conclusion = f"当前市场与个股证据基本满足{playbook.name}的研究前提"
         strategy = f"优化建议：{playbook.optimization_focus}"

@@ -7,12 +7,15 @@ from app.skills.common import clamp_score
 def assess_evidence_chain_quality(
     findings: list[AgentFinding],
     evidence_sources: list[EvidenceSource],
+    derived_insights: list[SkillInsight] | None = None,
 ) -> SkillInsight:
     source_by_id = {source.id: source for source in evidence_sources}
     total_agents = max(1, len(findings))
     agents_with_evidence = 0
     agents_with_sources = 0
     agents_with_counterpoints = 0
+    agents_with_risks = 0
+    agents_with_invalidation = 0
     referenced_source_ids: set[str] = set()
     risks: list[str] = []
     penalty = 0
@@ -48,11 +51,36 @@ def assess_evidence_chain_quality(
         if finding.counterpoints:
             agents_with_counterpoints += 1
         else:
-            penalty += 4
+            penalty += 10
+            risks.append(f"{finding.agent} 缺少反证，不能说明结论边界。")
+
+        if finding.risks:
+            agents_with_risks += 1
+        else:
+            penalty += 10
+            risks.append(f"{finding.agent} 缺少风险说明。")
+
+        if finding.invalidation_conditions:
+            agents_with_invalidation += 1
+        else:
+            penalty += 12
+            risks.append(f"{finding.agent} 缺少失效条件，结论不可复盘。")
 
         if not 0 <= finding.confidence <= 1:
             penalty += 10
             risks.append(f"{finding.agent} 的 confidence 不在 0-1 区间。")
+
+    skill_source_ids = {
+        str(source_id)
+        for insight in derived_insights or []
+        for source_id in insight.details.get("source_ids", [])
+        if source_id
+    }
+    referenced_source_ids.update(skill_source_ids)
+    unknown_skill_sources = sorted(skill_source_ids - set(source_by_id))
+    if unknown_skill_sources:
+        penalty += min(18, len(unknown_skill_sources) * 6)
+        risks.append(f"确定性 Skill 引用了未知来源：{', '.join(unknown_skill_sources)}。")
 
     unused_sources = [source.id for source in evidence_sources if source.id not in referenced_source_ids]
     if unused_sources:
@@ -88,7 +116,10 @@ def assess_evidence_chain_quality(
             f"Agent证据覆盖 {agents_with_evidence}/{total_agents}",
             f"Agent来源覆盖 {agents_with_sources}/{total_agents}",
             f"Agent反证覆盖 {agents_with_counterpoints}/{total_agents}",
+            f"Agent风险覆盖 {agents_with_risks}/{total_agents}",
+            f"Agent失效条件覆盖 {agents_with_invalidation}/{total_agents}",
             f"证据来源数量 {len(evidence_sources)}",
+            f"Skill 来源引用数量 {len(skill_source_ids)}",
         ],
         risks=risks,
     )

@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS analysis_reports (
     model_name TEXT,
     conclusion TEXT,
     risk_level TEXT,
+    data_status TEXT,
     confidence NUMERIC(10, 4),
     report_json JSONB NOT NULL,
     report_markdown TEXT,
@@ -157,4 +158,3 @@ CREATE TABLE IF NOT EXISTS memory_events (
     payload JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-

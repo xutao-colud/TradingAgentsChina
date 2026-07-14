@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from app.llm.config import DeepSeekConfig
 from app.llm.prompt_contracts import build_explanation_system_prompt, build_explanation_user_message
+from app.config.runtime import load_runtime_settings
 from app.schemas.report import AnalysisReport
 
 
@@ -32,13 +33,14 @@ class OpenAICompatibleClient:
         self._post_json = post_json or _post_json
 
     def explain(self, report: AnalysisReport, memory_context: dict[str, Any]) -> AnalysisReport:
+        request_config = load_runtime_settings().get("runtime", "llm_request")
         response = self._post_json(
             f"{self.base_url.rstrip('/')}/chat/completions",
             {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             {
                 "model": self.model,
-                "temperature": 0.2,
-                "max_tokens": 1200,
+                "temperature": request_config["temperature"],
+                "max_tokens": request_config["max_tokens"],
                 "messages": [
                     {"role": "system", "content": _system_prompt()},
                     {"role": "user", "content": _build_user_message(report, memory_context)},
@@ -70,10 +72,11 @@ class DeepSeekClient:
         if not self.config.is_configured():
             raise RuntimeError("DEEPSEEK_API_KEY is required when --deepseek-explain is enabled.")
 
+        request_config = load_runtime_settings().get("runtime", "llm_request")
         request_payload = {
             "model": self.config.model,
-            "temperature": 0.2,
-            "max_tokens": 1200,
+            "temperature": request_config["temperature"],
+            "max_tokens": request_config["max_tokens"],
             "messages": [
                 {
                     "role": "system",
@@ -119,7 +122,7 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
         method="POST",
     )
     try:
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=load_runtime_settings().get("runtime", "llm_network_timeout_seconds")) as response:
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]

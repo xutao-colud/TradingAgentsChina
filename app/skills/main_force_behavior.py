@@ -6,6 +6,22 @@ from app.skills.common import clamp_score
 
 
 def identify_main_force_behavior(prices: list[DailyPrice], flow: MoneyFlowSnapshot) -> SkillInsight:
+    if flow.main_net_inflow is None or flow.super_large_net_inflow is None:
+        missing = [
+            name
+            for name, value in (("主力净流入", flow.main_net_inflow), ("超大单净流入", flow.super_large_net_inflow))
+            if value is None
+        ]
+        return SkillInsight(
+            skill="主力资金行为识别",
+            category="capital",
+            stage="数据不足",
+            score=0,
+            conclusion="核心资金流字段不可用，不能推断吸筹、洗盘、拉升或派发。",
+            strategy="获取同一交易日且通过质量校验的资金流后再运行该技能。",
+            evidence=[f"数据时间：{flow.as_of or '未知'}"],
+            risks=[f"缺少字段：{', '.join(missing)}；系统未使用 0 值代替。"],
+        )
     snapshot = trend_snapshot(prices)
     latest = snapshot["latest_close"] or 0.0
     ma20 = snapshot["ma20"] or latest
@@ -40,4 +56,3 @@ def identify_main_force_behavior(prices: list[DailyPrice], flow: MoneyFlowSnapsh
         ],
         risks=["资金流口径存在供应商差异，不能机械判断主力意图。"],
     )
-

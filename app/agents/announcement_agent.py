@@ -1,34 +1,26 @@
 from __future__ import annotations
 
-from app.agents.common import clamp_score, confidence_from_score
-from app.schemas.report import AgentFinding, Announcement
+from app.agents.common import confidence_from_score
+from app.schemas.report import AgentFinding, Announcement, DailyPrice
+from app.skills.announcement_impact import analyze_announcement_impact
 
 
-def analyze_announcements(items: list[Announcement]) -> AgentFinding:
-    score = 50
-    evidence: list[str] = []
-    risks: list[str] = []
-    source_ids: list[str] = []
-    for item in items:
-        source_ids.append(item.source_id)
-        evidence.append(f"{item.priority}｜{item.title}：{item.summary}")
-        if item.sentiment == "positive":
-            score += 10 if item.priority in {"exchange", "company"} else 6
-        elif item.sentiment == "negative":
-            score -= 16 if item.priority in {"exchange", "company"} else 8
-            risks.append(item.summary)
-    final_score = clamp_score(score)
-    conclusion = "公告新闻偏正面" if final_score >= 60 else "公告新闻中性"
-    if final_score < 45:
-        conclusion = "公告新闻存在明显风险"
+def analyze_announcements(
+    items: list[Announcement],
+    prices: list[DailyPrice] | None = None,
+    analysis_date: str | None = None,
+) -> AgentFinding:
+    insight = analyze_announcement_impact(items, prices, analysis_date)
+    source_ids = list(dict.fromkeys(item.source_id for item in items if item.source_id))
     return AgentFinding(
         agent="新闻公告 Agent",
-        conclusion=conclusion,
-        score=final_score,
-        confidence=confidence_from_score(final_score),
-        evidence=evidence or ["未发现公告样例数据。"],
-        risks=risks,
-        counterpoints=["公告优先级高于媒体情绪，但仍需核验原文。"],
+        conclusion=insight.conclusion,
+        score=insight.score,
+        confidence=confidence_from_score(insight.score) if items else 0.0,
+        evidence=insight.evidence,
+        risks=insight.risks,
+        counterpoints=["公告后价格表现是观察性证据；行业、指数和同期事件可能共同影响走势。"],
+        invalidation_conditions=["公告原文关键条件与摘要不一致。", "后续更正公告、业绩快报或问询回复改变当前事件状态。"],
         source_ids=source_ids,
+        details=insight.details,
     )
-

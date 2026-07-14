@@ -8,9 +8,9 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
+from app.config.runtime import load_runtime_settings
 
 
-SINA_QUOTE_URL = "https://hq.sinajs.cn/list="
 _LINE_PATTERN = re.compile(r'var hq_str_([a-z]{2}\d{6})="([^"]*)";')
 _IDENTIFIER_PATTERN = re.compile(r"^(sh|sz)\d{6}$")
 FetchText = Callable[[str], str]
@@ -52,7 +52,7 @@ class SinaRealtimeQuoteClient:
         identifiers = {symbol: _to_sina_identifier(symbol) for symbol in normalized}
         if not identifiers:
             return {}
-        url = SINA_QUOTE_URL + ",".join(identifiers.values())
+        url = load_runtime_settings().get("providers", "sina", "quote_url") + ",".join(identifiers.values())
         try:
             raw = self._fetch_text(url)
             parsed = _parse_response(raw, identifiers, self._now())
@@ -144,8 +144,9 @@ def _data_status(now: datetime, trade_date: str | None) -> str:
 
 
 def _fetch_text(url: str) -> str:
-    if not url.startswith(SINA_QUOTE_URL):
+    sina = load_runtime_settings().get("providers", "sina")
+    if not url.startswith(sina["quote_url"]):
         raise ValueError("Blocked quote URL")
-    request = Request(url, headers={"User-Agent": "TradingAgentsChina/0.1", "Referer": "https://finance.sina.com.cn"})
-    with urlopen(request, timeout=8) as response:
+    request = Request(url, headers=sina["headers"])
+    with urlopen(request, timeout=load_runtime_settings().get("runtime", "network_timeout_seconds")) as response:
         return response.read().decode("gbk", errors="replace")

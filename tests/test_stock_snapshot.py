@@ -8,6 +8,21 @@ from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 
 
 class StockSnapshotTest(unittest.TestCase):
+    def test_fetch_snapshots_deduplicates_symbols_and_keeps_result_mapping(self) -> None:
+        class RecordingClient(EastmoneyStockSnapshotClient):
+            def __init__(self) -> None:
+                self.seen: list[str] = []
+
+            def fetch_snapshot(self, symbol: str):
+                self.seen.append(symbol)
+                return object()
+
+        client = RecordingClient()
+
+        snapshots = client.fetch_snapshots(["600519", "600519.SH", "000725"])
+
+        self.assertEqual(set(snapshots), {"600519.SH", "000725.SZ"})
+        self.assertEqual(set(client.seen), {"600519.SH", "000725.SZ"})
     def test_parses_quote_sector_and_order_size_flows(self) -> None:
         quote_payload = {
             "data": {

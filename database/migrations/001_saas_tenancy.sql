@@ -46,6 +46,7 @@ ALTER TABLE trading_profiles ADD COLUMN IF NOT EXISTS active_playbook TEXT;
 ALTER TABLE analysis_reports ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id);
 ALTER TABLE analysis_reports ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES app_users(id);
 ALTER TABLE analysis_reports ADD COLUMN IF NOT EXISTS active_playbook TEXT;
+ALTER TABLE analysis_reports ADD COLUMN IF NOT EXISTS data_status TEXT;
 ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id);
 ALTER TABLE feedback_events ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES app_users(id);
 ALTER TABLE memory_events ADD COLUMN IF NOT EXISTS tenant_id UUID REFERENCES tenants(id);
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS strategy_outcomes (
     analysis_report_id UUID NOT NULL REFERENCES analysis_reports(id),
     playbook_id TEXT NOT NULL,
     playbook_fit_score INTEGER NOT NULL CHECK (playbook_fit_score BETWEEN 0 AND 100),
+    market_regime TEXT NOT NULL DEFAULT 'unknown',
+    agent_scores JSONB NOT NULL DEFAULT '{}'::jsonb,
     outcome_return_pct NUMERIC(12, 4) NOT NULL,
     outcome_days INTEGER NOT NULL CHECK (outcome_days > 0),
     outcome_source TEXT NOT NULL CHECK (outcome_source IN ('manual', 'broker_import', 'simulated')),
@@ -101,6 +104,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 CREATE INDEX IF NOT EXISTS idx_strategy_outcomes_tenant_playbook
     ON strategy_outcomes (tenant_id, playbook_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_outcomes_playbook_regime
+    ON strategy_outcomes (tenant_id, playbook_id, market_regime, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_reports_tenant_user_date
     ON analysis_reports (tenant_id, user_id, analysis_date DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_created
