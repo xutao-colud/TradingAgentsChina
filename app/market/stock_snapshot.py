@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from app.market.realtime import RealtimeQuote
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
 from app.rules.trading_rules import normalize_symbol
 
 
@@ -106,7 +107,7 @@ class EastmoneyStockSnapshotClient:
         normalized = normalize_symbol(symbol)
         now = self._now()
         try:
-            quote_payload = _load_json(self._fetch_text(_quote_url(normalized)))
+            quote_payload = _load_json(self._request_text(_quote_url(normalized)))
             quote_data = quote_payload.get("data")
             if not isinstance(quote_data, dict):
                 raise ValueError(f"No quote data returned for {normalized}")
@@ -116,7 +117,7 @@ class EastmoneyStockSnapshotClient:
             return _unavailable_snapshot(normalized, str(exc), now)
 
     def fetch_money_flow(self, symbol: str) -> StockMoneyFlowBreakdown | None:
-        payload = _load_json(self._fetch_text(_flow_url(symbol)))
+        payload = _load_json(self._request_text(_flow_url(symbol)))
         data = payload.get("data")
         if not isinstance(data, dict):
             return None
@@ -142,6 +143,9 @@ class EastmoneyStockSnapshotClient:
             visible_large_net_inflow=_sum_optional(super_large, large),
             hidden_follow_net_inflow=_sum_optional(medium, small),
         )
+
+    def _request_text(self, url: str) -> str:
+        return retry_call(lambda: self._fetch_text(url), operation_name="Eastmoney stock snapshot")
 
 
 def _quote_url(symbol: str) -> str:

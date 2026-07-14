@@ -35,6 +35,8 @@ class ProviderCapabilities:
 
 
 class ProviderAdapter(ABC):
+    data_mode = "production"
+
     def get_provider_capabilities(self) -> list[ProviderCapabilities]:
         return []
 

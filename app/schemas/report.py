@@ -94,14 +94,14 @@ class IntradaySnapshot:
 
 @dataclass(frozen=True)
 class FundamentalSnapshot:
-    revenue_growth_yoy: float
-    profit_growth_yoy: float
-    roe: float
-    gross_margin: float
-    debt_to_asset: float
-    pe_ttm: float
-    pb: float
-    cashflow_quality: float
+    revenue_growth_yoy: float | None
+    profit_growth_yoy: float | None
+    roe: float | None
+    gross_margin: float | None
+    debt_to_asset: float | None
+    pe_ttm: float | None
+    pb: float | None
+    cashflow_quality: float | None
     forecast_revision: str
     revenue: float | None = None
     net_income: float | None = None
@@ -119,6 +119,12 @@ class FundamentalSnapshot:
     net_profit_margin: float | None = None
     asset_turnover: float | None = None
     equity_multiplier: float | None = None
+    goodwill_ratio: float | None = None
+    goodwill_as_of: str | None = None
+    goodwill_source_id: str | None = None
+    pledge_ratio: float | None = None
+    pledge_as_of: str | None = None
+    pledge_source_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -312,6 +318,13 @@ class StockProfile:
     concepts: list[str] = field(default_factory=list)
     concept_source_id: str | None = None
     list_date: str | None = None
+    major_shareholder_reduction: bool | None = None
+    major_shareholder_reduction_count: int | None = None
+    major_shareholder_reduction_as_of: str | None = None
+    major_shareholder_reduction_source_ids: list[str] = field(default_factory=list)
+    inquiry_count: int | None = None
+    inquiry_as_of: str | None = None
+    inquiry_source_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -397,6 +410,7 @@ class AnalysisReport:
     model_interpretation: str | None = None
     rule_version: str = "unknown"
     config_source: str = "unknown"
+    analysis_level: int = 3
     disclaimer: str = "研究分析输出，不构成投资建议或自动交易指令。"
 
     def to_dict(self) -> dict[str, Any]:

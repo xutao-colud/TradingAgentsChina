@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.llm.runtime import ModelRuntime
 from app.memory.local_store import LocalMemoryStore
 
@@ -30,7 +30,7 @@ class ModelRuntimeTest(unittest.TestCase):
 
             runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)
             runtime.configure("glm", "test-secret-key")
-            report = build_default_workflow().run("600519", "2026-07-10")
+            report = build_sample_workflow().run("600519", "2026-07-10")
             explained = runtime.explain(report, {})
             self.assertEqual(explained.fundamental_score, report.fundamental_score)
             self.assertEqual(explained.model_interpretation, "GLM 解释。")

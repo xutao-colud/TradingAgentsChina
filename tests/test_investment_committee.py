@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.schemas.report import (
     AgentFinding,
     AshareMarketSignals,
@@ -21,7 +21,7 @@ from app.skills.investment_committee import assess_investment_faction_committee
 
 class InvestmentCommitteeTest(unittest.TestCase):
     def test_default_sample_prefers_trend_capacity_route(self) -> None:
-        report = build_default_workflow().run("600519", "2026-07-10")
+        report = build_sample_workflow().run("600519", "2026-07-10")
         committee = next(item for item in report.skill_insights if item.skill == "投资流派委员会")
 
         self.assertEqual(committee.category, "committee")
@@ -32,9 +32,13 @@ class InvestmentCommitteeTest(unittest.TestCase):
         self.assertFalse(committee.details["factions"])
         self.assertFalse(committee.details["cross_examination"])
         self.assertEqual(committee.details["risk_challenge"]["role"], "risk_challenge")
+        readiness = committee.details["data_readiness"]
+        self.assertTrue(readiness["stage"])
+        self.assertTrue(readiness["evidence"])
+        self.assertTrue(readiness["risks"])
 
     def test_committee_responds_to_user_question(self) -> None:
-        report = build_default_workflow().run(
+        report = build_sample_workflow().run(
             "000725.SZ",
             "2026-07-10",
             user_question="现在适合短线入手还是等回踩？",

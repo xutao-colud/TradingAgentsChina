@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent, TradingProfile
 
@@ -12,7 +12,7 @@ class LocalMemoryStoreTest(unittest.TestCase):
     def test_save_analysis_creates_profile_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)
-            report = build_default_workflow().run("600519", "2026-07-10")
+            report = build_sample_workflow().run("600519", "2026-07-10")
             event = store.save_analysis(report, user_query="分析贵州茅台", model_name="deterministic-mvp")
 
             profile_path = Path(tmpdir) / "trading_profile.json"
@@ -27,7 +27,7 @@ class LocalMemoryStoreTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)
             store.save_profile(TradingProfile(favorite_themes=["AI", "机器人"]))
-            report = build_default_workflow().run("600519", "2026-07-10")
+            report = build_sample_workflow().run("600519", "2026-07-10")
             store.save_analysis(report)
             context = store.build_context("600519.SH")
 
@@ -81,7 +81,7 @@ class LocalMemoryStoreTest(unittest.TestCase):
                     user_comment="我不喜欢追高，倾向趋势回踩低吸",
                 )
             )
-            report = build_default_workflow().run("600519", "2026-07-10", source.load_profile())
+            report = build_sample_workflow().run("600519", "2026-07-10", source.load_profile())
             analysis = source.save_analysis(report, user_query="分析贵州茅台")
             source.save_interaction_summary(report, "分析贵州茅台", analysis.id)
             bundle_path = Path(source_dir) / "my-a-share-memory.json"
@@ -121,7 +121,7 @@ class LocalMemoryStoreTest(unittest.TestCase):
     def test_outcome_feedback_adapts_to_consent_gated_strategy_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)
-            report = build_default_workflow().run("600519", "2026-07-10", store.load_profile())
+            report = build_sample_workflow().run("600519", "2026-07-10", store.load_profile())
             event = store.save_analysis(report)
             store.record_feedback(
                 FeedbackEvent(
@@ -144,7 +144,7 @@ class LocalMemoryStoreTest(unittest.TestCase):
     def test_replay_keeps_original_report_and_later_outcome_side_by_side(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)
-            report = build_default_workflow().run("600519", "2026-07-10", store.load_profile())
+            report = build_sample_workflow().run("600519", "2026-07-10", store.load_profile())
             event = store.save_analysis(report)
             store.record_feedback(
                 FeedbackEvent(

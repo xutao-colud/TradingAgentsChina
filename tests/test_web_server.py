@@ -6,16 +6,40 @@ from datetime import datetime
 
 from app.memory.local_store import LocalMemoryStore
 from app.market.morning_radar import MorningMoneyRadarClient
-from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
+from app.graph.workflow import build_sample_workflow
 from app.web.server import ResearchWebApp
 
 
 class ResearchWebAppTest(unittest.TestCase):
+    def test_dashboard_runs_and_reads_persisted_opportunity_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=SinaRealtimeQuoteClient(fetch_text=lambda url: ""),
+                stock_snapshot_client=None,
+            )
+            app.add_watchlist({"symbol": "600519"})
+            result = app.scan_opportunities(
+                {
+                    "analysis_date": "2026-07-14",
+                    "symbols": ["000725"],
+                    "include_radar": False,
+                    "maximum_level": 1,
+                }
+            )
+
+            self.assertEqual(result["level_counts"]["level1"], 2)
+            self.assertEqual(app.opportunity_pool()["id"], result["id"])
+            replay = app.replay_opportunity({"event_id": result["memory_event_id"]})
+            self.assertEqual(replay["pool_snapshot"]["id"], result["id"])
+
     def test_dashboard_service_runs_analysis_and_persists_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            app = ResearchWebApp(LocalMemoryStore(tmpdir))
+            app = ResearchWebApp(LocalMemoryStore(tmpdir), workflow=build_sample_workflow())
             result = app.analyze(
                 {
                     "symbol": "600519",
@@ -139,3 +163,33 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(radar["data_status"], "real_time")
             self.assertEqual(radar["top_inflow_sectors"][0]["name"], "半导体")
             self.assertEqual(radar["fast_movers"][0]["symbol"], "000725.SZ")
+
+    def test_tracked_radar_enriches_individual_money_flow_without_claiming_sector_flow(self) -> None:
+        quote_payload = '{"data":{"f43":702,"f44":717,"f45":666,"f46":690,"f47":29367326,"f48":20295239099.47,"f57":"000725","f58":"BOE","f60":683,"f116":281166450005.76,"f117":268436547948.03,"f127":"Optics","f128":"Beijing","f129":"OLED","f168":278,"f170":0}}'
+        flow_payload = '{"data":{"klines":["2026-07-14,440532224.0,0,0,0,0,2.17,0,0,0,0,0"]}}'
+        responses = [quote_payload, flow_payload]
+        radar_client = MorningMoneyRadarClient(
+            fetch_text=lambda url: (_ for _ in ()).throw(OSError("curl: (56) Failure when receiving data from the peer")),
+            quote_fetcher=lambda symbols: {
+                "000725.SZ": RealtimeQuote(
+                    symbol="000725.SZ", name="BOE", price=7.02, previous_close=6.83,
+                    change_pct=2.78, volume=29_367_326, amount=20_295_239_099.47,
+                    trade_date="2026-07-14", trade_time="15:35:45",
+                )
+            },
+            now=lambda: datetime(2026, 7, 14, 14, 0, 0),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                morning_radar_client=radar_client,
+                stock_snapshot_client=EastmoneyStockSnapshotClient(fetch_text=lambda url: responses.pop(0), now=lambda: datetime(2026, 7, 14, 14, 0, 0)),
+            )
+            app.add_watchlist({"symbol": "000725"})
+            radar = app.morning_radar({"limit": 3})
+
+            self.assertEqual(radar["data_status"], "tracked_universe")
+            self.assertEqual(radar["source"], "sina_tracked_universe+eastmoney_stock_flow")
+            self.assertEqual(radar["top_inflow_sectors"], [])
+            self.assertEqual(radar["fast_movers"][0]["name"], "BOE")
+            self.assertEqual(radar["fast_movers"][0]["main_net_inflow"], 440532224.0)

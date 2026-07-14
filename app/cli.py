@@ -4,11 +4,14 @@ import argparse
 import json
 import sys
 
-from app.graph.workflow import build_default_workflow, build_production_workflow
+from app.graph.workflow import build_production_workflow, build_sample_workflow
 from app.llm.config import DeepSeekConfig
 from app.llm.deepseek_client import DeepSeekClient
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
+from app.market.morning_radar import MorningMoneyRadarClient
+from app.market.stock_snapshot import EastmoneyStockSnapshotClient
+from app.opportunities.pipeline import OpportunityPipeline
 from app.playbooks.catalog import list_playbooks
 from app.reporting.render import render_markdown
 from app.schemas.report import today_iso
@@ -39,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-report-id", help="Saved analysis event ID for outcome feedback")
     parser.add_argument("--outcome-return-pct", type=float, help="Recorded outcome return percentage; requires --feedback-type outcome")
     parser.add_argument("--outcome-days", type=int, help="Outcome holding days; requires --feedback-type outcome")
+    parser.add_argument("--opportunity-scan", action="store_true", help="Run the market-first opportunity-pool pipeline")
+    parser.add_argument("--opportunity-symbol", action="append", default=[], help="Add an explicit L1 candidate; repeatable")
+    parser.add_argument("--opportunity-level", type=int, choices=[1, 2, 3], default=3, help="Maximum opportunity analysis level")
+    parser.add_argument("--no-radar", action="store_true", help="Exclude verified intraday radar movers from the opportunity universe")
+    parser.add_argument("--list-opportunity-pool", action="store_true", help="Print the latest persisted opportunity pool")
+    parser.add_argument("--replay-opportunity", metavar="EVENT_ID", help="Replay one persisted opportunity-pool run")
     return parser
 
 
@@ -66,8 +75,32 @@ def main() -> None:
     if args.replay_analysis:
         print(json.dumps(store.replay_analysis(args.replay_analysis), ensure_ascii=False, indent=2))
         return
+    if args.replay_opportunity:
+        print(json.dumps(store.replay_opportunity_run(args.replay_opportunity), ensure_ascii=False, indent=2))
+        return
+    if args.list_opportunity_pool:
+        print(json.dumps(store.load_opportunity_pool() or {"pipeline_status": "not_run", "candidates": []}, ensure_ascii=False, indent=2))
+        return
+    if args.opportunity_scan:
+        workflow = build_production_workflow() if args.provider == "production" else build_sample_workflow()
+        symbols = [*args.opportunity_symbol]
+        if args.symbol:
+            symbols.insert(0, args.symbol)
+        result = OpportunityPipeline(
+            workflow,
+            store,
+            stock_snapshot_client=EastmoneyStockSnapshotClient(),
+            morning_radar_client=MorningMoneyRadarClient(),
+        ).run(
+            analysis_date=args.date,
+            explicit_symbols=symbols,
+            include_radar=not args.no_radar,
+            maximum_level=args.opportunity_level,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
     if not args.symbol:
-        parser.error("symbol is required unless --export-memory or --import-memory is used")
+        parser.error("symbol is required unless a memory or opportunity-pool command is used")
     if args.feedback:
         feedback = store.record_feedback(
             FeedbackEvent(
@@ -82,7 +115,7 @@ def main() -> None:
         )
         print(json.dumps({"feedback_event": feedback.to_dict(), "trading_profile": store.load_profile().to_dict()}, ensure_ascii=False, indent=2))
         return
-    workflow = build_production_workflow() if args.provider == "production" else build_default_workflow()
+    workflow = build_production_workflow() if args.provider == "production" else build_sample_workflow()
     memory_context = store.build_context(args.symbol)
     default_question = f"分析 {args.symbol}（{args.date}）"
     report = workflow.run(args.symbol, args.date, trading_profile=store.load_profile(), user_question=default_question)

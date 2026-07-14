@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from typing import Any, Protocol
 
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
 from app.data.providers.base import MarketDataProvider, ProviderCapabilities
 from app.data.quality import validate_dataset_records, validate_raw_snapshot
 from app.data.raw_snapshots import (
@@ -149,9 +150,11 @@ class TushareMarketDataProvider(MarketDataProvider):
         revenue = _optional_number(income, "total_revenue")
         net_income = _optional_number(income, "n_income")
         operating_cash_flow = _optional_number(cashflow, "n_cashflow_act")
-        cashflow_quality = operating_cash_flow / net_income if operating_cash_flow is not None and net_income not in {None, 0} else _number(row, "ocf_yoy")
+        cashflow_quality = operating_cash_flow / net_income if operating_cash_flow is not None and net_income not in {None, 0} else None
         total_assets = _optional_number(balance, "total_assets")
         total_equity = _optional_number(balance, "total_hldr_eqy_exc_min_int")
+        goodwill = _optional_number(balance, "goodwill")
+        goodwill_ratio = goodwill / total_equity * 100 if goodwill is not None and total_equity not in {None, 0} else None
         net_profit_margin = net_income / revenue if net_income is not None and revenue not in {None, 0} else None
         asset_turnover = revenue / total_assets if revenue is not None and total_assets not in {None, 0} else None
         equity_multiplier = total_assets / total_equity if total_assets is not None and total_equity not in {None, 0} else None
@@ -164,15 +167,67 @@ class TushareMarketDataProvider(MarketDataProvider):
                 _iso_date(_text(row, "end_date", default="unknown")),
                 target_snapshot_ids,
             )
+        goodwill_source_id = "goodwill-risk-001"
+        goodwill_as_of = _iso_date(_text(balance, "end_date")) or None
+        if goodwill_ratio is not None and goodwill_as_of:
+            self._record_evidence(
+                goodwill_source_id,
+                f"{normalized} Tushare 商誉与净资产",
+                "tushare_balancesheet",
+                goodwill_as_of,
+                target_snapshot_ids,
+            )
+        pledge_snapshot_start = len(self._raw_snapshots)
+        pledge_rows = self._query("pledge_stat", ts_code=normalized)
+        pledge_query_ok = self._last_query_succeeded("pledge_stat", ts_code=normalized)
+        pledge_row = _latest_available_record(pledge_rows, effective_date)
+        pledge_source_id = "pledge-risk-001"
+        pledge_record = ({
+            "end_date": _iso_date(_text(pledge_row, "end_date")),
+            "pledge_ratio": _optional_number(pledge_row, "pledge_ratio"),
+            "source_id": pledge_source_id,
+        } if pledge_row else None)
+        pledge_snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[pledge_snapshot_start:]]
+        valid_pledge, pledge_quality = validate_dataset_records(
+            provider="tushare",
+            dataset="pledge_risk",
+            records=[pledge_record] if pledge_record else [],
+            analysis_date=effective_date,
+            snapshot_ids=pledge_snapshot_ids,
+        )
+        if not pledge_query_ok:
+            pledge_quality = replace(
+                pledge_quality,
+                status="failed",
+                issues=[
+                    *pledge_quality.issues,
+                    DataQualityIssue(
+                        code="provider_query_failed",
+                        severity="error",
+                        message="Tushare pledge_stat query failed; pledge risk remains unavailable.",
+                    ),
+                ],
+            )
+        self._quality_reports[(normalized, effective_date, "pledge_risk")] = pledge_quality
+        pledge_ratio = float(valid_pledge[0]["pledge_ratio"]) if valid_pledge else None
+        pledge_as_of = str(valid_pledge[0]["end_date"]) if valid_pledge else None
+        if valid_pledge:
+            self._record_evidence(
+                pledge_source_id,
+                f"{normalized} Tushare 股权质押统计",
+                "tushare_pledge_stat",
+                pledge_as_of or effective_date,
+                pledge_snapshot_ids,
+            )
         peer_medians, peer_sizes, peer_as_of, peer_source_id, peer_reasons = self._peer_medians(
             normalized,
             row,
             effective_date,
         )
         return FundamentalSnapshot(
-            revenue_growth_yoy=_number(row, "or_yoy"), profit_growth_yoy=_number(row, "q_netprofit_yoy"), roe=_number(row, "roe"),
-            gross_margin=_number(row, "grossprofit_margin"), debt_to_asset=_number(row, "debt_to_assets"), pe_ttm=_number(basic_row, "pe_ttm"),
-            pb=_number(basic_row, "pb"), cashflow_quality=cashflow_quality, forecast_revision="未获取到业绩预期修正",
+            revenue_growth_yoy=_optional_number(row, "or_yoy"), profit_growth_yoy=_optional_number(row, "q_netprofit_yoy"), roe=_optional_number(row, "roe"),
+            gross_margin=_optional_number(row, "grossprofit_margin"), debt_to_asset=_optional_number(row, "debt_to_assets"), pe_ttm=_optional_number(basic_row, "pe_ttm"),
+            pb=_optional_number(basic_row, "pb"), cashflow_quality=cashflow_quality, forecast_revision="未获取到业绩预期修正",
             revenue=revenue,
             net_income=net_income,
             operating_cash_flow=operating_cash_flow,
@@ -189,6 +244,12 @@ class TushareMarketDataProvider(MarketDataProvider):
             net_profit_margin=net_profit_margin,
             asset_turnover=asset_turnover,
             equity_multiplier=equity_multiplier,
+            goodwill_ratio=goodwill_ratio,
+            goodwill_as_of=goodwill_as_of,
+            goodwill_source_id=goodwill_source_id if goodwill_ratio is not None and goodwill_as_of else None,
+            pledge_ratio=pledge_ratio,
+            pledge_as_of=pledge_as_of,
+            pledge_source_id=pledge_source_id if valid_pledge else None,
         )
 
     def _peer_medians(
@@ -821,14 +882,14 @@ class TushareMarketDataProvider(MarketDataProvider):
             first_board_symbols = {
                 _text(row, "ts_code")
                 for row in up_rows
-                if _text(row, "ts_code") and _number(row, times_field) == 1
+                if _text(row, "ts_code") and _number(row, times_field) == float(config["first_board_value"])
             }
             max_boards = int(max((_number(row, times_field) for row in up_rows), default=0))
             failed_denominator = len(up_rows) + len(broken_rows)
             failed_rate = len(broken_rows) / failed_denominator * 100 if failed_denominator else 0.0
             sealed_rate = len(up_rows) / failed_denominator * 100 if failed_denominator else 0.0
             one_price_count = sum(
-                _number(row, open_times_field) == 0
+                _number(row, open_times_field) <= float(config["one_price_max_open_count"])
                 and _text(row, first_time_field) in set(config["one_price_first_times"])
                 for row in up_rows
             )
@@ -1367,14 +1428,27 @@ class TushareMarketDataProvider(MarketDataProvider):
 
     def _corporate_events(self, symbol: str, analysis_date: str) -> list[CorporateEvent]:
         events: list[CorporateEvent] = []
+        holder_events: list[CorporateEvent] = []
+        holder_query_ok = False
+        holder_snapshot_ids: list[str] = []
+        risk_config = load_runtime_settings().get("domain_knowledge", "risk_scanner")
+        holder_start = (
+            date.fromisoformat(analysis_date) - timedelta(days=int(risk_config["holder_reduction_lookback_days"]))
+        ).strftime("%Y%m%d")
         event_specs = (("forecast", "业绩预告", "negative"), ("express", "业绩快报", "neutral"), ("income", "实际业绩", "neutral"), ("share_float", "限售解禁", "negative"), ("stk_holdertrade", "股东增减持", "negative"))
         for interface, event_type, default_impact in event_specs:
             snapshot_start = len(self._raw_snapshots)
-            rows = self._query(interface, ts_code=symbol)
+            params: dict[str, object] = {"ts_code": symbol}
+            if interface == "stk_holdertrade":
+                params.update(start_date=holder_start, end_date=_compact_date(analysis_date))
+            rows = self._query(interface, **params)
             snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[snapshot_start:]]
+            if interface == "stk_holdertrade":
+                holder_query_ok = self._last_query_succeeded(interface, **params)
+                holder_snapshot_ids = snapshot_ids
             for row in rows:
                 published_at = _iso_date(_text(row, "ann_date", "f_ann_date", "trade_date", default=analysis_date))
-                if published_at > analysis_date:
+                if published_at > analysis_date or (interface == "stk_holdertrade" and published_at < _iso_date(holder_start)):
                     continue
                 impact = _event_impact(_text(row, "type", "in_de", "trade_type"), default_impact)
                 title = f"{event_type}：{_text(row, 'holder_name', 'end_date', default=symbol)}"
@@ -1384,7 +1458,7 @@ class TushareMarketDataProvider(MarketDataProvider):
                 ).hexdigest()[:12]
                 forecast_min = _optional_number(row, "net_profit_min")
                 forecast_max = _optional_number(row, "net_profit_max")
-                events.append(CorporateEvent(
+                event = CorporateEvent(
                     event_type,
                     title,
                     published_at,
@@ -1396,7 +1470,10 @@ class TushareMarketDataProvider(MarketDataProvider):
                     forecast_net_profit_max_yuan=forecast_max * 10_000 if interface == "forecast" and forecast_max is not None else None,
                     actual_net_profit_yuan=_optional_number(row, "n_income") if interface in {"express", "income"} else None,
                     first_announced_at=_iso_date(_text(row, "first_ann_date")) or None,
-                ))
+                )
+                events.append(event)
+                if interface == "stk_holdertrade":
+                    holder_events.append(event)
                 self._record_evidence(
                     source_id,
                     f"{symbol} {event_type}",
@@ -1404,7 +1481,36 @@ class TushareMarketDataProvider(MarketDataProvider):
                     published_at,
                     snapshot_ids,
                 )
-        return events
+        holder_events, holder_quality = validate_dataset_records(
+            provider="tushare",
+            dataset="holder_trades",
+            records=holder_events,
+            analysis_date=analysis_date,
+            snapshot_ids=holder_snapshot_ids,
+        )
+        if not holder_query_ok:
+            holder_quality = replace(
+                holder_quality,
+                status="failed",
+                issues=[
+                    *holder_quality.issues,
+                    DataQualityIssue(
+                        code="provider_query_failed",
+                        severity="error",
+                        message="Tushare stk_holdertrade query failed; reduction risk remains unavailable.",
+                    ),
+                ],
+            )
+        self._quality_reports[(symbol, analysis_date, "holder_trades")] = holder_quality
+        if holder_query_ok:
+            self._record_evidence(
+                "holder-trade-coverage-tushare-001",
+                f"{symbol} Tushare 重要股东增减持覆盖",
+                "tushare_stk_holdertrade",
+                analysis_date,
+                holder_snapshot_ids,
+            )
+        return [item for item in events if item.event_type != "股东增减持"] + holder_events
 
     def _query(self, interface_key: str, **kwargs: object) -> list[dict[str, Any]]:
         method_name = self.config["interfaces"][interface_key]
@@ -1414,8 +1520,10 @@ class TushareMarketDataProvider(MarketDataProvider):
             self._capture(method_name, kwargs, [], "error", message)
             return []
         try:
-            response = getattr(self._client, method_name)(**kwargs)
-            records = _records(response)
+            records = retry_call(
+                lambda: _records(getattr(self._client, method_name)(**kwargs)),
+                operation_name=f"Tushare {method_name}",
+            )
             self._capture(method_name, kwargs, records, "success")
             return records
         except Exception as exc:  # provider entitlement/rate-limit failures must remain visible as unavailable data

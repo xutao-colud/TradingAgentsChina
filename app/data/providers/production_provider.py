@@ -105,7 +105,10 @@ class ProductionMarketDataProvider(MarketDataProvider):
         return sorted(deduplicated.values(), key=lambda item: (item.published_at, item.title))
 
     def get_market_context(self, analysis_date: str) -> MarketContext:
-        return self.tushare.get_market_context(analysis_date)
+        context = self.tushare.get_market_context(analysis_date)
+        if context.data_status == "verified":
+            return context
+        return self.akshare.get_market_context(analysis_date)
 
     def get_ah_premium(self, symbol: str, analysis_date: str) -> AhPremiumSnapshot:
         return self.tushare.get_ah_premium(symbol, analysis_date)
@@ -176,7 +179,10 @@ class ProductionMarketDataProvider(MarketDataProvider):
             quality_reports=[*tushare.quality_reports, *akshare.quality_reports],
         )
         self._signal_cache[cache_key] = signals
-        self._evidence[cache_key] = sources
+        self._evidence[cache_key] = _deduplicate_sources([
+            *self._evidence.get(cache_key, []),
+            *sources,
+        ])
         return signals
 
     def get_evidence_sources(self, symbol: str, analysis_date: str) -> list[EvidenceSource]:

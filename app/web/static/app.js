@@ -1,4 +1,4 @@
-const state = { lastSymbol: "600519", committee: null };
+const state = { lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null };
 
 const $ = (id) => document.getElementById(id);
 
@@ -45,12 +45,24 @@ function renderPlaybooks(payload) {
 
 function renderModels(status) {
   const select = $("modelProvider"); select.replaceChildren();
+  state.modelProviders = status.providers;
+  state.activeProviderId = status.active_provider;
   status.providers.forEach((provider) => {
-    const option = document.createElement("option"); option.value = provider.id; text(option, `${provider.name} · ${provider.default_model}`); option.selected = provider.id === status.active_provider; select.append(option);
+    const option = document.createElement("option"); option.value = provider.id; text(option, provider.name); option.selected = provider.id === status.active_provider; select.append(option);
   });
   $("modelName").value = status.active_model || "";
   const active = status.providers.find((provider) => provider.id === status.active_provider);
+  renderModelProviderIdentity(active);
   text($("modelStatus"), active?.configured ? `${active.name} 已配置（密钥来源：${active.key_source}）。可勾选报告解释。` : `${active?.name || "当前模型"} 未配置。页面输入的密钥只保存到当前服务会话；重启后请重新输入或使用 ${active?.env_key || "环境变量"}。`);
+}
+
+function renderModelProviderIdentity(provider) {
+  text($("modelProviderName"), provider?.name || "未选择服务商");
+  text($("modelProviderDefault"), provider ? `默认模型 · ${provider.default_model}` : "默认模型未提供");
+}
+
+function selectedModelProvider() {
+  return state.modelProviders.find((provider) => provider.id === $("modelProvider").value);
 }
 
 function scoreTile(label, value) {
@@ -70,6 +82,7 @@ function watchRow(item, openDetail = false) {
   text(symbol, `${item.symbol}${snapshot?.name ? ` · ${snapshot.name}` : ""}`);
   text(note, item.note || "未填写观察备注"); main.append(symbol, note);
   const quote = item.quote;
+  if (!snapshot?.name && quote?.name) text(symbol, `${item.symbol} · ${quote.name}`);
   const price = document.createElement("b"); const meta = document.createElement("small");
   if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quote.data_status} · ${quote.trade_date || ""}`); }
   else { text(price, "行情不可用"); price.className = "flat"; text(meta, quote?.error || "请刷新后重试"); }
@@ -188,10 +201,22 @@ function radarRow(title, meta, value, tone = "flat") {
   row.append(main, score); return row;
 }
 
+function trackedMoverRow(item) {
+  const flow = item.main_net_inflow == null ? "主力净流入：该源未提供" : `主力净流入 ${yi(item.main_net_inflow)} · 占比 ${percentage(item.main_net_inflow_ratio)}`;
+  const speed = item.speed_pct == null ? "涨速：该源未提供" : `涨速 ${percentage(item.speed_pct)}`;
+  const meta = `现价 ${money(item.price)} · 涨跌 ${percentage(item.change_pct)} · 成交额 ${yi(item.amount)} · ${flow} · ${speed} · ${item.trigger_reason}`;
+  return radarRow(`${item.name || "未命名个股"} · ${item.symbol}`, meta, money(item.price), item.change_pct >= 0 ? "up" : "down");
+}
+
+function radarUnavailableRow(message) {
+  const row = document.createElement("div"); row.className = "empty-state compact"; text(row, message); return row;
+}
+
 function renderMorningRadar(snapshot) {
   text($("morningRadarStatus"), `${snapshot.data_status} · ${snapshot.market_phase} · ${snapshot.as_of}`);
   text($("morningRadarMessage"), `${snapshot.shortline_read}${snapshot.error ? ` 数据源提示：${snapshot.error}` : ""}`);
   const inflow = $("sectorInflow"); const outflow = $("sectorOutflow"); const movers = $("fastMovers");
+  const trackedOnly = snapshot.data_status === "tracked_universe";
   inflow.replaceChildren(); outflow.replaceChildren(); movers.replaceChildren();
   (snapshot.top_inflow_sectors || []).forEach((item) => inflow.append(radarRow(item.name, `涨跌 ${percentage(item.change_pct)} · 占比 ${percentage(item.main_net_inflow_ratio)}`, yi(item.main_net_inflow), "up")));
   (snapshot.top_outflow_sectors || []).forEach((item) => outflow.append(radarRow(item.name, `涨跌 ${percentage(item.change_pct)} · 占比 ${percentage(item.main_net_inflow_ratio)}`, yi(item.main_net_inflow), "down")));
@@ -199,6 +224,13 @@ function renderMorningRadar(snapshot) {
   if (!inflow.children.length) inflow.append(emptyRadar());
   if (!outflow.children.length) outflow.append(emptyRadar());
   if (!movers.children.length) movers.append(emptyRadar());
+  if (trackedOnly) {
+    inflow.replaceChildren(radarUnavailableRow("全市场板块资金流接口暂不可用；不展示或推断流入板块。"));
+    outflow.replaceChildren(radarUnavailableRow("全市场板块资金流接口暂不可用；不展示或推断流出板块。"));
+    movers.replaceChildren();
+    (snapshot.fast_movers || []).forEach((item) => movers.append(trackedMoverRow(item)));
+    if (!movers.children.length) movers.append(radarUnavailableRow("当前自选、持仓与机会池中没有可核验报价。"));
+  }
 }
 
 function emptyRadar() { const empty = document.createElement("div"); empty.className = "empty-state compact"; text(empty, "暂无数据。"); return empty; }
@@ -231,11 +263,30 @@ function renderReport(report) {
     if (skill.details?.mode === "risk_scan") row.append(riskExplainPanel(skill));
     skills.append(row);
   });
-  const committee = (report.skill_insights || []).find((skill) => skill.category === "committee" && skill.details?.mode === "court");
-  state.committee = committee?.details || null;
+  const committee = (report.skill_insights || []).find((skill) => skill.category === "committee");
+  state.committee = normalizeCommitteeCourt(committee);
   $("committeeButton").hidden = !state.committee;
   if (state.committee) renderCommitteeCourt(state.committee);
   const model = $("modelSection"); model.hidden = !report.model_interpretation; text($("modelInterpretation"), report.model_interpretation);
+}
+
+function normalizeCommitteeCourt(committee) {
+  if (!committee) return null;
+  const details = committee.details && typeof committee.details === "object" ? committee.details : {};
+  const judge = details.judge && typeof details.judge === "object" ? details.judge : {};
+  return {
+    ...details,
+    mode: "court",
+    judge: {
+      ...judge,
+      verdict: judge.verdict || committee.conclusion || "委员会未形成可展示的裁决。",
+      action: judge.action || committee.strategy || "等待可追溯的证据补齐后重新审查。",
+    },
+    factions: Array.isArray(details.factions) ? details.factions : [],
+    cross_examination: Array.isArray(details.cross_examination) ? details.cross_examination : [],
+    evidence: Array.isArray(committee.evidence) ? committee.evidence : [],
+    risks: Array.isArray(committee.risks) ? committee.risks : [],
+  };
 }
 
 function riskExplainPanel(skill) {
@@ -279,7 +330,10 @@ function riskCheckGrid(checks) {
 
 function renderCommitteeCourt(details) {
   const judge = details.judge || {};
-  const judgeBox = $("committeeJudge"); judgeBox.replaceChildren();
+  const judgeBox = $("committeeJudge");
+  const root = $("committeeFactions");
+  if (!judgeBox || !root) return;
+  judgeBox.replaceChildren();
   const title = document.createElement("strong"); text(title, `Judge 裁决：${judge.winner || "暂无优势"}`);
   const topic = document.createElement("em"); text(topic, `研讨问题：${judge.discussion_topic || "当前个股是否值得继续研究"}`);
   const meta = document.createElement("span"); text(meta, `${judge.winner_route || "—"} · 可靠性 ${judge.reliability || "—"} · 领先 ${judge.score_gap ?? "—"} 分`);
@@ -288,8 +342,13 @@ function renderCommitteeCourt(details) {
   const action = document.createElement("p"); action.className = "judge-action"; text(action, judge.action || "等待更高质量证据。");
   judgeBox.append(title, topic, meta, method, verdict, action);
 
-  const root = $("committeeFactions"); root.replaceChildren();
-  (details.factions || []).forEach((faction) => {
+  root.replaceChildren();
+  const factions = Array.isArray(details.factions) ? details.factions : [];
+  if (!factions.length) {
+    root.append(committeeRefusalPanel(details));
+    return;
+  }
+  factions.forEach((faction) => {
     const card = document.createElement("article"); card.className = `faction-card${faction.winner ? " winner" : ""}`;
     const head = document.createElement("div"); const name = document.createElement("strong"); const score = document.createElement("b");
     text(name, `${faction.name} · ${faction.route}`); text(score, `${faction.score} / ${faction.stance}`); head.append(name, score);
@@ -300,6 +359,20 @@ function renderCommitteeCourt(details) {
     const risks = courtList("反证/风险", faction.risks);
     card.append(head, response, advice, scoreDetail, reasons, risks); root.append(card);
   });
+}
+
+function committeeRefusalPanel(details) {
+  const panel = document.createElement("article"); panel.className = "committee-refusal";
+  const title = document.createElement("strong"); text(title, "本次未进入流派比较");
+  const explanation = document.createElement("p");
+  text(explanation, "这是数据质量门禁的裁决结果，不代表委员会数据丢失，也不会用默认分数补齐。请根据下列缺口补数后重新研判。");
+  const readiness = details.data_readiness || {};
+  const evidence = Array.isArray(readiness.evidence) && readiness.evidence.length ? readiness.evidence : details.evidence || [];
+  const risks = Array.isArray(readiness.risks) && readiness.risks.length ? readiness.risks : details.risks || [];
+  const status = document.createElement("span");
+  text(status, `数据审查：${readiness.stage || "未通过或未提供"}${readiness.score == null ? "" : ` · ${readiness.score} 分`}`);
+  panel.append(title, explanation, status, courtList("待核验证据", evidence), courtList("阻断原因 / 风险", risks));
+  return panel;
 }
 
 function courtScoreDetail(faction) {
@@ -395,6 +468,15 @@ $("modelForm").addEventListener("submit", async (event) => {
 $("clearModelKey").addEventListener("click", async () => {
   try { const { data } = await api("/api/models/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider_id: $("modelProvider").value }) }); renderModels(data); }
   catch (error) { text($("modelStatus"), `清除失败：${error.message}`); }
+});
+
+$("modelProvider").addEventListener("change", () => {
+  const provider = selectedModelProvider();
+  renderModelProviderIdentity(provider);
+  if (provider && ($("modelName").value.trim() === "" || state.activeProviderId !== provider.id)) {
+    $("modelName").value = provider.default_model;
+  }
+  state.activeProviderId = provider?.id || null;
 });
 
 $("refreshMarket").addEventListener("click", refreshMarket);

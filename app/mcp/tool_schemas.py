@@ -125,6 +125,37 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["symbol", "feedback_type", "user_comment"],
         },
     },
+    {
+        "name": "scan_opportunity_pool",
+        "title": "A-share Opportunity Pool Scan",
+        "description": "Run the market-first L1/L2/L3 research pipeline. Scores are evidence and playbook-fit observations, never win-rate claims.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "analysis_date": {"type": "string", "format": "date"},
+                "symbols": {"type": "array", "items": {"type": "string"}},
+                "include_radar": {"type": "boolean", "default": True},
+                "maximum_level": {"type": "integer", "minimum": 1, "maximum": 3, "default": 3},
+            },
+            "required": ["analysis_date"],
+        },
+    },
+    {
+        "name": "get_opportunity_pool",
+        "title": "Get Latest Opportunity Pool",
+        "description": "Read the latest locally persisted opportunity-pool snapshot.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "replay_opportunity_pool",
+        "title": "Replay Opportunity Pool Run",
+        "description": "Replay an immutable opportunity-pool run with its original evidence and gates.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"event_id": {"type": "string"}},
+            "required": ["event_id"],
+        },
+    },
 ]
 
 

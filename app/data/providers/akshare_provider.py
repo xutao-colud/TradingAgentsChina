@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 from app.config.runtime import load_runtime_settings
+from app.network.retry import retry_call
 from app.data.providers.base import ProviderAdapter, ProviderCapabilities
 from app.data.quality import validate_dataset_records, validate_raw_snapshot
 from app.data.raw_snapshots import (
@@ -13,12 +15,13 @@ from app.data.raw_snapshots import (
     RawDataSnapshot,
     RawSnapshotStore,
     build_raw_snapshot,
+    snapshot_is_intact,
     snapshot_matches,
 )
 from app.rules.trading_rules import normalize_symbol
 from app.schemas.report import (
-    Announcement, AshareMarketSignals, CorporateEvent, DailyPrice, DataQualityReport, EvidenceSource, IntradayBar,
-    IntradaySnapshot, NorthboundHoldingRecord, OrderBookLevel,
+    Announcement, AshareMarketSignals, CorporateEvent, DailyPrice, DataQualityIssue, DataQualityReport, EvidenceSource, IntradayBar,
+    IntradaySnapshot, MarketContext, NorthboundHoldingRecord, OrderBookLevel,
 )
 
 
@@ -38,14 +41,23 @@ class AkshareSupplementProvider(ProviderAdapter):
         client: AkshareClient | None = None,
         today: Callable[[], date] | None = None,
         raw_store: RawSnapshotStore | None = None,
+        enable_slow_bulk_queries: bool | None = None,
     ) -> None:
         self.config = load_runtime_settings().get("providers", "akshare")
         self._client = client or self._build_client()
         self._today = today or date.today
         self._raw_store = raw_store or InMemoryRawSnapshotStore()
+        bulk_config = self.config["bulk_snapshot_cache"]
+        self._enable_slow_bulk_queries = (
+            bool(bulk_config["slow_bulk_queries_enabled"])
+            if enable_slow_bulk_queries is None
+            else enable_slow_bulk_queries
+        )
         self._raw_snapshots: list[RawDataSnapshot] = []
+        self._call_outcomes: list[tuple[str, dict[str, object], str]] = []
         self._quality_reports: dict[tuple[str, str, str], DataQualityReport] = {}
         self._announcement_sources: dict[tuple[str, str], list[EvidenceSource]] = {}
+        self._market_sources: dict[str, list[EvidenceSource]] = {}
         self._errors: list[str] = []
 
     @property
@@ -92,6 +104,7 @@ class AkshareSupplementProvider(ProviderAdapter):
         code = normalize_symbol(symbol).split(".")[0]
         northbound = self._northbound(code, analysis_date)
         events = self._holder_trades(code, analysis_date)
+        holder_quality = self._quality_reports.get((normalize_symbol(symbol), analysis_date, "holder_trades"))
         sources: list[EvidenceSource] = []
         if northbound:
             sources.append(EvidenceSource(
@@ -107,7 +120,15 @@ class AkshareSupplementProvider(ProviderAdapter):
                 f"{code} 股东增减持",
                 "akshare_stock_ggcg_em",
                 max(item.published_at for item in events),
-                snapshot_ids=self._snapshot_ids(("holder_trade",), normalize_symbol(symbol), analysis_date),
+                snapshot_ids=holder_quality.snapshot_ids if holder_quality else [],
+            ))
+        if holder_quality and holder_quality.status == "passed":
+            sources.append(EvidenceSource(
+                "holder-trade-coverage-akshare-001",
+                f"{code} AkShare 股东增减持覆盖",
+                "akshare_stock_ggcg_em",
+                analysis_date,
+                snapshot_ids=holder_quality.snapshot_ids,
             ))
         status = "verified" if sources else "unavailable"
         quality_reports = [
@@ -124,24 +145,166 @@ class AkshareSupplementProvider(ProviderAdapter):
             quality_reports=quality_reports,
         )
 
+    def get_market_context(self, analysis_date: str) -> MarketContext:
+        """Return a real current-session breadth snapshot without relabelling history.
+
+        AkShare's all-A-share quote table is a current snapshot. Historical market
+        breadth remains a Tushare responsibility because using today's breadth for
+        an earlier analysis date would create look-ahead contamination.
+        """
+        if analysis_date != self._today().isoformat():
+            return MarketContext(
+                index_name=self.config["market_context"]["index_name"],
+                index_change_pct=None,
+                total_amount=None,
+                advancers=None,
+                decliners=None,
+                limit_up_count=None,
+                limit_down_count=None,
+                hot_money_cycle="数据不足",
+                policy_themes=[],
+                data_status="unavailable",
+                as_of=None,
+                unavailable_reasons=["AkShare 全市场行情是当日截面，不能用于历史日期分析。"],
+            )
+
+        config = self.config["market_context"]
+        fields = config["fields"]
+        compact_date = analysis_date.replace("-", "")
+        spot_rows = self._call("market_spot")
+        index_rows = self._call("index_spot", symbol=config["index_series"])
+        up_rows = self._call("limit_up", date=compact_date)
+        down_rows = self._call("limit_down", date=compact_date)
+        broken_rows = self._call("limit_broken", date=compact_date)
+        calls_ok = all(
+            self._last_call_succeeded(key, **params)
+            for key, params in (
+                ("market_spot", {}),
+                ("index_spot", {"symbol": config["index_series"]}),
+                ("limit_up", {"date": compact_date}),
+                ("limit_down", {"date": compact_date}),
+                ("limit_broken", {"date": compact_date}),
+            )
+        )
+        index_row = next(
+            (row for row in index_rows if _text(row, fields["code"]) == str(config["index_code"])),
+            None,
+        )
+        pct_changes = [_optional_number(row, fields["pct_change"]) for row in spot_rows]
+        amounts = [_optional_number(row, fields["amount"]) for row in spot_rows]
+        complete_spot = bool(spot_rows) and all(value is not None for value in pct_changes + amounts)
+        board_values = [_optional_number(row, fields["board_count"]) for row in up_rows]
+        complete_limit = self._last_call_succeeded("limit_up", date=compact_date) and all(
+            value is not None for value in board_values
+        )
+        index_change = _optional_number(index_row or {}, fields["pct_change"])
+
+        market_rules = load_runtime_settings().get("providers", "tushare", "market_context")
+        advancers = (
+            sum(float(value) > float(market_rules["advance_threshold_pct"]) for value in pct_changes if value is not None)
+            if complete_spot
+            else None
+        )
+        decliners = (
+            sum(float(value) < float(market_rules["decline_threshold_pct"]) for value in pct_changes if value is not None)
+            if complete_spot
+            else None
+        )
+        total_amount = sum(float(value) for value in amounts if value is not None) if complete_spot else None
+        failed_denominator = len(up_rows) + len(broken_rows)
+        failed_rate = len(broken_rows) / failed_denominator * 100 if failed_denominator else None
+        sealed_rate = len(up_rows) / failed_denominator * 100 if failed_denominator else None
+        first_times = set(market_rules["one_price_first_times"])
+        one_price_count = (
+            sum(
+                _number(row, fields["open_count"]) <= float(market_rules["one_price_max_open_count"])
+                and _text(row, fields["first_limit_time"]) in first_times
+                for row in up_rows
+            )
+            if complete_limit
+            else None
+        )
+        board_ladder = (
+            _configured_board_ladder(up_rows, fields["board_count"], market_rules["board_ladder_buckets"])
+            if complete_limit
+            else {}
+        )
+        normalized_record = {
+            "trade_date": analysis_date,
+            "index_change_pct": index_change,
+            "total_amount": total_amount,
+            "advancers": advancers,
+            "decliners": decliners,
+            "limit_up_count": len(up_rows) if calls_ok else None,
+            "limit_down_count": len(down_rows) if calls_ok else None,
+            "failed_breakout_rate": failed_rate,
+            "sealed_limit_up_rate": sealed_rate,
+            "one_price_limit_up_count": one_price_count,
+            "broken_limit_up_count": len(broken_rows) if calls_ok else None,
+            "board_ladder": board_ladder,
+        }
+        snapshot_ids = self._market_snapshot_ids(analysis_date)
+        valid, quality = validate_dataset_records(
+            provider="akshare",
+            dataset="market_breadth_current",
+            records=[normalized_record] if calls_ok else [],
+            analysis_date=analysis_date,
+            snapshot_ids=snapshot_ids,
+        )
+        self._quality_reports[("__market__", analysis_date, "market_breadth_current")] = quality
+        verified = bool(valid) and quality.status == "passed"
+        reasons: list[str] = ["AkShare 当日截面不提供连续市场情绪历史；情绪速度/加速度保持数据不足。"]
+        if not verified:
+            reasons.extend(self._errors or ["AkShare 当日市场广度或涨跌停池字段不完整。"])
+        if verified:
+            self._market_sources[analysis_date] = [EvidenceSource(
+                "market-001",
+                f"{config['index_name']}、全市场实时宽度与涨跌停池",
+                "akshare_stock_zh_a_spot_em_stock_zt_pool_em",
+                analysis_date,
+                snapshot_ids=snapshot_ids,
+            )]
+        return MarketContext(
+            index_name=config["index_name"],
+            index_change_pct=index_change if verified else None,
+            total_amount=total_amount if verified else None,
+            advancers=advancers if verified else None,
+            decliners=decliners if verified else None,
+            limit_up_count=len(up_rows) if verified else None,
+            limit_down_count=len(down_rows) if verified else None,
+            hot_money_cycle="数据不足",
+            policy_themes=[],
+            failed_breakout_rate=failed_rate if verified else None,
+            max_consecutive_boards=int(max(board_values, default=0)) if verified else None,
+            first_board_count=(sum(value == float(market_rules["first_board_value"]) for value in board_values) if verified else None),
+            sealed_limit_up_rate=sealed_rate if verified else None,
+            one_price_limit_up_count=one_price_count if verified else None,
+            broken_limit_up_count=len(broken_rows) if verified else None,
+            board_ladder=board_ladder if verified else {},
+            sentiment_history=[],
+            data_status="verified" if verified else "insufficient",
+            as_of=analysis_date if verified else None,
+            unavailable_reasons=_unique_text(reasons),
+        )
+
     def get_announcements(self, symbol: str, analysis_date: str) -> list[Announcement]:
         normalized = normalize_symbol(symbol)
         code = normalized.split(".")[0]
         config = load_runtime_settings().get("domain_knowledge", "announcement_timeliness")
         start = (date.fromisoformat(analysis_date) - timedelta(days=int(config["calendar_lookback_days"]))).strftime("%Y%m%d")
-        rows = [
-            row
-            for market in self.config["announcement_markets"]
-            for row in self._call(
-                "announcement",
-                symbol=code,
-                market=market,
-                keyword="",
-                category="",
-                start_date=start,
-                end_date=analysis_date.replace("-", ""),
-            )
-        ]
+        rows: list[dict[str, Any]] = []
+        announcement_calls_ok = True
+        for market in self.config["announcement_markets"]:
+            params = {
+                "symbol": code,
+                "market": market,
+                "keyword": "",
+                "category": "",
+                "start_date": start,
+                "end_date": analysis_date.replace("-", ""),
+            }
+            rows.extend(self._call("announcement", **params))
+            announcement_calls_ok = announcement_calls_ok and self._last_call_succeeded("announcement", **params)
         items: list[Announcement] = []
         sources: list[EvidenceSource] = []
         for row in rows:
@@ -183,15 +346,41 @@ class AkshareSupplementProvider(ProviderAdapter):
             analysis_date=analysis_date,
             snapshot_ids=self._snapshot_ids(("announcement",), normalized, analysis_date),
         )
+        if not announcement_calls_ok:
+            quality = replace(
+                quality,
+                status="failed",
+                issues=[
+                    *quality.issues,
+                    DataQualityIssue(
+                        code="provider_query_failed",
+                        severity="error",
+                        message="One or more CNInfo announcement queries failed; inquiry coverage is incomplete.",
+                    ),
+                ],
+            )
         self._quality_reports[(normalized, analysis_date, "announcements")] = quality
         valid_ids = {item.source_id for item in items}
+        if announcement_calls_ok:
+            sources.append(EvidenceSource(
+                "announcement-coverage-cninfo-001",
+                f"{code} 巨潮资讯公告覆盖",
+                "akshare_cninfo_disclosure",
+                analysis_date,
+                snapshot_ids=quality.snapshot_ids,
+            ))
         self._announcement_sources[(normalized, analysis_date)] = list({
-            item.id: item for item in sources if item.id in valid_ids
+            item.id: item
+            for item in sources
+            if item.id in valid_ids or item.id == "announcement-coverage-cninfo-001"
         }.values())
         return items
 
     def get_evidence_sources(self, symbol: str, analysis_date: str) -> list[EvidenceSource]:
-        return list(self._announcement_sources.get((normalize_symbol(symbol), analysis_date), []))
+        return [
+            *self._announcement_sources.get((normalize_symbol(symbol), analysis_date), []),
+            *self._market_sources.get(analysis_date, []),
+        ]
 
     def get_raw_snapshots(self, symbol: str, analysis_date: str) -> list[RawDataSnapshot]:
         normalized = normalize_symbol(symbol)
@@ -202,7 +391,7 @@ class AkshareSupplementProvider(ProviderAdapter):
         semantic = [
             report
             for (report_symbol, report_date, _), report in self._quality_reports.items()
-            if report_symbol == normalized and report_date == analysis_date
+            if report_symbol in {normalized, "__market__"} and report_date == analysis_date
         ]
         raw = [validate_raw_snapshot(item) for item in self.get_raw_snapshots(normalized, analysis_date)]
         return [*semantic, *raw]
@@ -264,32 +453,136 @@ class AkshareSupplementProvider(ProviderAdapter):
         return valid[0] if valid else None
 
     def _holder_trades(self, code: str, analysis_date: str) -> list[CorporateEvent]:
-        rows = self._call("holder_trade", symbol="全部")
+        normalized = normalize_symbol(code)
+        if not self._enable_slow_bulk_queries:
+            _, quality = validate_dataset_records(
+                provider="akshare",
+                dataset="holder_trades",
+                records=[],
+                analysis_date=analysis_date,
+                snapshot_ids=[],
+            )
+            self._quality_reports[(normalized, analysis_date, "holder_trades")] = replace(
+                quality,
+                status="warning",
+                issues=[
+                    *quality.issues,
+                    DataQualityIssue(
+                        code="slow_bulk_query_disabled",
+                        severity="warning",
+                        message=(
+                            "AkShare 全市场股东增减持查询已按运行配置关闭；"
+                            "优先使用 Tushare 按标的接口，缺失时该风险保持未知。"
+                        ),
+                    ),
+                ],
+            )
+            return []
+        params = {"symbol": "全部"}
+        snapshot_start = len(self._raw_snapshots)
+        rows = self._call("holder_trade", **params)
+        holder_snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[snapshot_start:]]
+        query_ok = self._last_call_succeeded("holder_trade", **params)
+        config = load_runtime_settings().get("domain_knowledge", "risk_scanner")
+        earliest = date.fromisoformat(analysis_date) - timedelta(days=int(config["holder_reduction_lookback_days"]))
         events: list[CorporateEvent] = []
         for row in rows:
             if _text(row, "代码") != code:
                 continue
+            published_at = _normalized_date(_text(row, "公告日", "公告日期", "变动截止日", "截止日期"))
+            if not published_at or not earliest <= date.fromisoformat(published_at) <= date.fromisoformat(analysis_date):
+                continue
             action = _text(row, "持股变动信息-增减", "变动方向", default="未知")
             impact = "negative" if "减" in action else "positive" if "增" in action else "neutral"
-            events.append(CorporateEvent("股东增减持", f"股东{action}：{_text(row, '股东名称', default=code)}", analysis_date, impact, f"变动数量：{_text(row, '持股变动信息-变动数量', default='未披露')}", "holder-trade-akshare-001"))
+            events.append(CorporateEvent("股东增减持", f"股东{action}：{_text(row, '股东名称', default=code)}", published_at, impact, f"变动数量：{_text(row, '持股变动信息-变动数量', default='未披露')}", "holder-trade-akshare-001"))
+        events, quality = validate_dataset_records(
+            provider="akshare",
+            dataset="holder_trades",
+            records=events,
+            analysis_date=analysis_date,
+            snapshot_ids=holder_snapshot_ids,
+        )
+        if not query_ok:
+            quality = replace(
+                quality,
+                status="failed",
+                issues=[
+                    *quality.issues,
+                    DataQualityIssue(
+                        code="provider_query_failed",
+                        severity="error",
+                        message="AkShare holder-trade query failed; reduction risk remains unavailable.",
+                    ),
+                ],
+            )
+        self._quality_reports[(normalized, analysis_date, "holder_trades")] = quality
         return events
 
     def _call(self, key: str, **kwargs: object) -> list[dict[str, Any]]:
         function_name = self.config["functions"][key]
+        cached = self._cached_bulk_snapshot(key, kwargs)
+        if cached is not None:
+            snapshot, records = cached
+            if all(item.snapshot_id != snapshot.snapshot_id for item in self._raw_snapshots):
+                self._raw_snapshots.append(snapshot)
+            self._call_outcomes.append((function_name, dict(kwargs), "success"))
+            return records
         if self._client is None:
             message = "AkShare client is unavailable; install the optional package."
             self._errors.append(message)
             self._capture(function_name, kwargs, [], "error", message)
+            self._call_outcomes.append((function_name, dict(kwargs), "error"))
             return []
         try:
-            records = _records(getattr(self._client, function_name)(**kwargs))
+            records = retry_call(
+                lambda: _records(getattr(self._client, function_name)(**kwargs)),
+                operation_name=f"AkShare {function_name}",
+            )
             self._capture(function_name, kwargs, records, "success")
+            self._call_outcomes.append((function_name, dict(kwargs), "success"))
             return records
         except Exception as exc:  # public endpoint failures are evidence unavailability, never neutral facts
             message = f"AkShare {function_name} unavailable: {exc}"
             self._errors.append(message)
             self._capture(function_name, kwargs, [], "error", message)
+            self._call_outcomes.append((function_name, dict(kwargs), "error"))
             return []
+
+    def _cached_bulk_snapshot(
+        self,
+        key: str,
+        request_params: dict[str, object],
+    ) -> tuple[RawDataSnapshot, list[dict[str, Any]]] | None:
+        config = self.config.get("bulk_snapshot_cache", {})
+        if key not in set(config.get("enabled_interfaces", [])):
+            return None
+        maximum_age = timedelta(minutes=float(config["maximum_age_minutes"]))
+        interface = self.config["functions"][key]
+        now = datetime.now(timezone.utc)
+        candidates = [
+            item
+            for item in self._raw_store.list()
+            if item.provider == "akshare"
+            and item.interface == interface
+            and item.status == "success"
+            and not item.truncated
+            and item.request_params == request_params
+            and snapshot_is_intact(item)
+        ]
+        for snapshot in sorted(candidates, key=lambda item: item.requested_at, reverse=True):
+            requested_at = datetime.fromisoformat(snapshot.requested_at)
+            if requested_at.tzinfo is None:
+                requested_at = requested_at.replace(tzinfo=timezone.utc)
+            if timedelta(0) <= now - requested_at <= maximum_age:
+                return snapshot, [dict(item) for item in snapshot.records]
+        return None
+
+    def _last_call_succeeded(self, key: str, **expected_params: object) -> bool:
+        function_name = self.config["functions"][key]
+        for interface, params, status in reversed(self._call_outcomes):
+            if interface == function_name and all(params.get(name) == value for name, value in expected_params.items()):
+                return status == "success"
+        return False
 
     def _capture(
         self,
@@ -323,6 +616,17 @@ class AkshareSupplementProvider(ProviderAdapter):
             item.snapshot_id
             for item in self.get_raw_snapshots(symbol, analysis_date)
             if item.interface in function_names
+        ]
+
+    def _market_snapshot_ids(self, analysis_date: str) -> list[str]:
+        function_names = {
+            self.config["functions"][key]
+            for key in ("market_spot", "index_spot", "limit_up", "limit_down", "limit_broken")
+        }
+        return [
+            item.snapshot_id
+            for item in self._raw_snapshots
+            if item.interface in function_names and item.analysis_date in {None, analysis_date}
         ]
 
     def _build_client(self) -> AkshareClient | None:
@@ -374,6 +678,35 @@ def _first_number_matching(row: dict[str, Any], fragment: str) -> float | None:
 def _date_text(row: dict[str, Any], key: str) -> str:
     value = _text(row, key)
     return value[:10]
+
+
+def _normalized_date(value: str) -> str:
+    digits = "".join(character for character in value if character.isdigit())
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return ""
+
+
+def _configured_board_ladder(
+    rows: list[dict[str, Any]],
+    board_count_field: str,
+    buckets: list[dict[str, object]],
+) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for bucket in buckets:
+        minimum = int(bucket["minimum"])
+        maximum = bucket.get("maximum")
+        result[str(bucket["label"])] = sum(
+            value is not None
+            and value >= minimum
+            and (maximum is None or value <= int(maximum))
+            for value in (_optional_number(row, board_count_field) for row in rows)
+        )
+    return result
+
+
+def _unique_text(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
 
 
 def _order_book_levels(rows: list[dict[str, Any]]) -> tuple[list[OrderBookLevel], list[OrderBookLevel]]:

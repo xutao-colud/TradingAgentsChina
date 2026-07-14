@@ -5,10 +5,12 @@ from datetime import date
 from typing import Any
 
 from app.data.providers.base import MarketDataProvider
-from app.data.providers.sample_provider import SampleMarketDataProvider
+from app.data.providers.production_provider import ProductionMarketDataProvider
 from app.market.morning_radar import MorningMoneyRadarClient
+from app.graph.workflow import AShareResearchWorkflow
 from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
+from app.opportunities.pipeline import OpportunityPipeline
 from app.mcp.tool_schemas import find_tool_schema, list_tool_schemas
 from app.rules.trading_rules import normalize_symbol
 from app.tools.registry import ToolRegistry
@@ -17,9 +19,8 @@ from app.tools.registry import ToolRegistry
 class McpToolServer:
     """A small stdio-MCP compatible tool dispatcher.
 
-    The default provider is deliberately offline.  Replacing it with an
-    authenticated production provider changes where facts come from, not the
-    MCP contract or the local-memory behaviour.
+    Production data is the default. Tests and offline demonstrations must inject
+    an explicit sample provider so sample facts cannot leak into live tools.
     """
 
     protocol_version = "2025-06-18"
@@ -30,7 +31,7 @@ class McpToolServer:
         memory_store: LocalMemoryStore | None = None,
         registry: ToolRegistry | None = None,
     ) -> None:
-        self.provider = provider or SampleMarketDataProvider()
+        self.provider = provider or ProductionMarketDataProvider()
         self.memory_store = memory_store or LocalMemoryStore()
         self.registry = registry or build_builtin_registry(self.provider, self.memory_store)
 
@@ -169,6 +170,32 @@ def build_builtin_registry(provider: MarketDataProvider, memory_store: LocalMemo
                 "storage": "local_append_only",
             }
 
+    def scan_opportunity_pool(arguments: dict[str, Any]) -> dict[str, Any]:
+            symbols = arguments.get("symbols", [])
+            if not isinstance(symbols, list) or any(not isinstance(item, str) for item in symbols):
+                raise ValueError("symbols must be an array of stock symbols")
+            pipeline = OpportunityPipeline(
+                AShareResearchWorkflow(provider),
+                memory_store,
+                morning_radar_client=MorningMoneyRadarClient(),
+            )
+            return pipeline.run(
+                analysis_date=str(arguments["analysis_date"]),
+                explicit_symbols=symbols,
+                include_radar=arguments.get("include_radar") is not False,
+                maximum_level=_optional_int(arguments.get("maximum_level")) or 3,
+            )
+
+    def get_opportunity_pool(arguments: dict[str, Any]) -> dict[str, Any]:
+            return memory_store.load_opportunity_pool() or {
+                "pipeline_status": "not_run",
+                "candidates": [],
+                "excluded": [],
+            }
+
+    def replay_opportunity_pool(arguments: dict[str, Any]) -> dict[str, Any]:
+            return memory_store.replay_opportunity_run(str(arguments["event_id"]))
+
     handlers = {
         "get_realtime_quote": get_realtime_quote,
         "get_daily_bars": get_daily_bars,
@@ -178,6 +205,9 @@ def build_builtin_registry(provider: MarketDataProvider, memory_store: LocalMemo
         "search_announcements": search_announcements,
         "save_analysis_event": save_analysis_event,
         "record_feedback": record_feedback,
+        "scan_opportunity_pool": scan_opportunity_pool,
+        "get_opportunity_pool": get_opportunity_pool,
+        "replay_opportunity_pool": replay_opportunity_pool,
     }
     for schema in list_tool_schemas():
         registry.register(schema, handlers[schema["name"]])

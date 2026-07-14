@@ -31,6 +31,7 @@ KNOWN_STOCK_PROFILES: dict[str, StockProfile] = {
 
 
 class SampleMarketDataProvider(MarketDataProvider):
+    data_mode = "sample"
     """Offline fixture provider used by tests, demos, and local-first workflows."""
 
     def get_stock_profile(self, symbol: str) -> StockProfile:

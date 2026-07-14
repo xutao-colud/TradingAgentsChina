@@ -20,6 +20,7 @@ from app.indicators.technical import required_history_bars
 from app.memory.models import TradingProfile
 from app.playbooks.evaluator import assess_active_playbook
 from app.rules.trading_rules import invalid_conditions, normalize_symbol
+from app.rules.risk_facts import enrich_stock_profile_risks
 from app.rules.special_instruments import assess_listing_stage
 from app.schemas.report import AnalysisReport
 from dataclasses import replace
@@ -56,7 +57,19 @@ class AShareResearchWorkflow:
         analysis_date: str,
         trading_profile: TradingProfile | None = None,
         user_question: str | None = None,
+        include_committee: bool = True,
     ) -> AnalysisReport:
+        state = self.prepare_state(symbol, analysis_date, trading_profile, user_question)
+        self._run_domain_skills(state, include_committee=include_committee)
+        return self.build_report(state, analysis_level=3 if include_committee else 2)
+
+    def prepare_state(
+        self,
+        symbol: str,
+        analysis_date: str,
+        trading_profile: TradingProfile | None = None,
+        user_question: str | None = None,
+    ) -> ResearchState:
         normalized_symbol = normalize_symbol(symbol)
         state = ResearchState(
             symbol=normalized_symbol,
@@ -72,8 +85,12 @@ class AShareResearchWorkflow:
             state.data_quality_reports,
         )
         self._run_agents(state)
-        self._run_domain_skills(state)
-        return self._build_report(state)
+        return state
+
+    def evaluate_state(self, state: ResearchState, include_committee: bool = False) -> AnalysisReport:
+        """Evaluate one prepared state without fetching its provider data again."""
+        self._run_domain_skills(state, include_committee=include_committee)
+        return self.build_report(state, analysis_level=3 if include_committee else 2)
 
     def _collect_data(self, state: ResearchState) -> None:
         state.profile = self.provider.get_stock_profile(state.symbol)
@@ -95,6 +112,14 @@ class AShareResearchWorkflow:
         sources = [*self.provider.get_evidence_sources(state.symbol, state.analysis_date), *(state.market_signals.evidence_sources if state.market_signals else [])]
         state.evidence_sources = list({item.id: item for item in sources}.values())
         state.data_quality_reports = self.provider.get_data_quality_reports(state.symbol, state.analysis_date)
+        state.profile = enrich_stock_profile_risks(
+            state.profile,
+            state.market_signals,
+            state.announcements,
+            state.evidence_sources,
+            state.data_quality_reports,
+            state.analysis_date,
+        )
         state.invalid_conditions = invalid_conditions(state.profile, state.prices)
 
     def _run_agents(self, state: ResearchState) -> None:
@@ -116,7 +141,7 @@ class AShareResearchWorkflow:
                 for item in state.findings
             ]
 
-    def _run_domain_skills(self, state: ResearchState) -> None:
+    def _run_domain_skills(self, state: ResearchState, include_committee: bool = True) -> None:
         if not all([state.profile, state.fundamentals, state.money_flow, state.market_context]):
             raise ValueError("Incomplete research state; cannot run domain skills.")
         base_insights = [
@@ -139,7 +164,13 @@ class AShareResearchWorkflow:
             analyze_intraday_snapshot(state.intraday) if state.intraday else None,
             assess_listing_stage(state.profile, state.analysis_date) if state.profile.list_date else None,
             analyze_announcement_impact(state.announcements, state.prices, state.analysis_date),
-            scan_a_share_risks(state.profile, state.fundamentals, state.invalid_conditions),
+            scan_a_share_risks(
+                state.profile,
+                state.fundamentals,
+                state.invalid_conditions,
+                prices=state.prices,
+                evidence_sources=state.evidence_sources,
+            ),
         ]
         base_insights = [item for item in base_insights if item is not None]
         base_insights.append(
@@ -154,6 +185,12 @@ class AShareResearchWorkflow:
         playbook_assessment = assess_active_playbook(state.trading_profile, state.findings, state.skill_insights)
         if playbook_assessment:
             state.skill_insights.append(playbook_assessment)
+        if include_committee:
+            self.convene_committee(state)
+
+    def convene_committee(self, state: ResearchState) -> None:
+        if any(item.category == "committee" for item in state.skill_insights):
+            return
         state.skill_insights.append(
             assess_investment_faction_committee(
                 state.findings,
@@ -169,7 +206,7 @@ class AShareResearchWorkflow:
             )
         )
 
-    def _build_report(self, state: ResearchState) -> AnalysisReport:
+    def build_report(self, state: ResearchState, analysis_level: int = 3) -> AnalysisReport:
         if not state.profile or not state.market_context:
             raise ValueError("Cannot build report before data collection.")
         conclusion, action_plan, confidence = decide_rating(state.findings, state.invalid_conditions, state.skill_insights)
@@ -203,10 +240,15 @@ class AShareResearchWorkflow:
             user_question=state.user_question,
             rule_version=settings.rule_version,
             config_source=settings.source,
+            analysis_level=analysis_level,
         )
 
 
 def build_default_workflow() -> AShareResearchWorkflow:
+    return build_production_workflow()
+
+
+def build_sample_workflow() -> AShareResearchWorkflow:
     return AShareResearchWorkflow(provider=SampleMarketDataProvider())
 
 

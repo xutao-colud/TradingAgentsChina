@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.config.runtime import load_runtime_settings
 from app.schemas.report import AgentFinding, EvidenceSource, SkillInsight
 from app.skills.common import clamp_score
 
@@ -9,6 +10,7 @@ def assess_evidence_chain_quality(
     evidence_sources: list[EvidenceSource],
     derived_insights: list[SkillInsight] | None = None,
 ) -> SkillInsight:
+    config = load_runtime_settings().get("scoring", "evidence_chain")
     source_by_id = {source.id: source for source in evidence_sources}
     total_agents = max(1, len(findings))
     agents_with_evidence = 0
@@ -24,19 +26,19 @@ def assess_evidence_chain_quality(
         if finding.evidence:
             agents_with_evidence += 1
         else:
-            penalty += 14
+            penalty += config["missing_evidence_penalty"]
             risks.append(f"{finding.agent} 缺少证据。")
 
         if finding.source_ids:
             agents_with_sources += 1
             referenced_source_ids.update(finding.source_ids)
         else:
-            penalty += 14
+            penalty += config["missing_source_penalty"]
             risks.append(f"{finding.agent} 缺少 source_ids，结论不可追溯。")
 
         unknown_sources = [source_id for source_id in finding.source_ids if source_id not in source_by_id]
         if unknown_sources:
-            penalty += min(18, len(unknown_sources) * 6)
+            penalty += min(config["unknown_source_cap"], len(unknown_sources) * config["unknown_source_each"])
             risks.append(f"{finding.agent} 引用了未知来源：{', '.join(unknown_sources)}。")
 
         missing_source_time = [
@@ -45,29 +47,29 @@ def assess_evidence_chain_quality(
             if source_id in source_by_id and not source_by_id[source_id].as_of
         ]
         if missing_source_time:
-            penalty += min(12, len(missing_source_time) * 4)
+            penalty += min(config["missing_time_cap"], len(missing_source_time) * config["missing_time_each"])
             risks.append(f"{finding.agent} 的部分来源缺少 as_of 时间。")
 
         if finding.counterpoints:
             agents_with_counterpoints += 1
         else:
-            penalty += 10
+            penalty += config["missing_counterpoint_penalty"]
             risks.append(f"{finding.agent} 缺少反证，不能说明结论边界。")
 
         if finding.risks:
             agents_with_risks += 1
         else:
-            penalty += 10
+            penalty += config["missing_risk_penalty"]
             risks.append(f"{finding.agent} 缺少风险说明。")
 
         if finding.invalidation_conditions:
             agents_with_invalidation += 1
         else:
-            penalty += 12
+            penalty += config["missing_invalidation_penalty"]
             risks.append(f"{finding.agent} 缺少失效条件，结论不可复盘。")
 
         if not 0 <= finding.confidence <= 1:
-            penalty += 10
+            penalty += config["invalid_confidence_penalty"]
             risks.append(f"{finding.agent} 的 confidence 不在 0-1 区间。")
 
     skill_source_ids = {
@@ -79,24 +81,24 @@ def assess_evidence_chain_quality(
     referenced_source_ids.update(skill_source_ids)
     unknown_skill_sources = sorted(skill_source_ids - set(source_by_id))
     if unknown_skill_sources:
-        penalty += min(18, len(unknown_skill_sources) * 6)
+        penalty += min(config["unknown_source_cap"], len(unknown_skill_sources) * config["unknown_source_each"])
         risks.append(f"确定性 Skill 引用了未知来源：{', '.join(unknown_skill_sources)}。")
 
     unused_sources = [source.id for source in evidence_sources if source.id not in referenced_source_ids]
     if unused_sources:
-        penalty += min(8, len(unused_sources) * 2)
-        risks.append(f"存在未被 Agent 引用的证据来源：{', '.join(unused_sources[:4])}。")
+        penalty += min(config["unused_source_cap"], len(unused_sources) * config["unused_source_each"])
+        risks.append(f"存在未被 Agent 引用的证据来源：{', '.join(unused_sources[:config['unused_source_display_limit']])}。")
 
-    score = clamp_score(100 - penalty)
-    if score >= 85:
+    score = clamp_score(config["base_score"] - penalty)
+    if score >= config["complete_threshold"]:
         stage = "完整"
         conclusion = "证据链完整，当前报告具备可追溯基础"
         strategy = "可以进入策略比较与风险审查，但仍需核验真实数据源。"
-    elif score >= 70:
+    elif score >= config["usable_threshold"]:
         stage = "可用"
         conclusion = "证据链基本可用，但仍有少量可追溯性缺口"
         strategy = "保持结论克制，优先补齐未引用或低质量来源。"
-    elif score >= 55:
+    elif score >= config["needs_evidence_threshold"]:
         stage = "待补证据"
         conclusion = "证据链存在明显缺口，不宜输出强结论"
         strategy = "将最终结论限制在观察级别，先补齐来源和反证。"

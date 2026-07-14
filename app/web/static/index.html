@@ -70,7 +70,7 @@
         <div class="radar-grid">
           <div><h4>主力流入板块</h4><div id="sectorInflow" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
           <div><h4>主力流出板块</h4><div id="sectorOutflow" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
-          <div><h4>极速拉升个股</h4><div id="fastMovers" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
+          <div><h4>跟踪个股（名称 / 代码）</h4><div id="fastMovers" class="radar-list"><div class="empty-state compact">尚未刷新。</div></div></div>
         </div>
       </section>
 
@@ -92,7 +92,8 @@
           <article class="model-card">
             <div class="section-heading"><span>模型</span><h2>实时解释引擎</h2></div>
             <form id="modelForm" class="model-form">
-              <label>服务商<select id="modelProvider"></select></label>
+              <label class="model-provider-control">推理服务商<select id="modelProvider" aria-describedby="modelProviderHint"></select></label>
+              <div class="model-provider-summary" id="modelProviderHint"><span>当前服务商</span><strong id="modelProviderName">读取中</strong><small id="modelProviderDefault">默认模型读取中</small></div>
               <label>模型名称<input id="modelName" placeholder="使用服务商默认模型"></label>
               <label>API Key（仅当前服务会话）<input id="modelKey" type="password" minlength="8" maxlength="512" autocomplete="off" placeholder="不会写入个人档案"></label>
               <button type="submit">配置当前模型</button><button id="clearModelKey" type="button" class="secondary-button">清除会话密钥</button>

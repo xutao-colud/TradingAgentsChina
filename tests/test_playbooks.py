@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.graph.workflow import build_default_workflow
+from app.graph.workflow import build_sample_workflow
 from app.memory.models import TradingProfile
 from app.playbooks.catalog import DEFAULT_PLAYBOOK_ID, list_playbooks
 from app.playbooks.evaluator import assess_active_playbook
@@ -17,7 +17,7 @@ class PlaybookTest(unittest.TestCase):
 
     def test_workflow_adds_active_playbook_assessment(self) -> None:
         profile = TradingProfile(active_playbook="institutional_growth")
-        report = build_default_workflow().run("600519", "2026-07-10", profile)
+        report = build_sample_workflow().run("600519", "2026-07-10", profile)
         assessment = next(item for item in report.skill_insights if item.category == "playbook")
         self.assertEqual(report.active_playbook, "institutional_growth")
         self.assertEqual(assessment.skill, "公开风格原型适配")
