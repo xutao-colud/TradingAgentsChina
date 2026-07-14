@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-14.14",
+  "rule_version": "2026-07-14.15",
   "runtime": {
     "network_timeout_seconds": 8,
     "llm_network_timeout_seconds": 45,
@@ -357,14 +357,15 @@
     "data_readiness": {"minimum_daily_bars": 20, "verified_score": 90, "mixed_score": 55, "quality_warning_score": 70, "sample_score": 40, "insufficient_score": 20, "required_source_ids": ["price-001", "fund-001", "flow-001", "market-001"], "time_sensitive_source_ids": ["price-001", "flow-001", "market-001"]},
     "committee_signals": {
       "required_quality_status": "passed",
-      "dragon_tiger": {"aggressive_direction_impact": 6, "institution_direction_impact": 3},
+      "dragon_tiger": {"aggressive_direction_impact": 6, "institution_direction_impact": 3, "identified_hot_money_seat_impact": 2, "identified_hot_money_max_impact": 4},
+      "dragon_tiger_history": {"horizon_days": 3, "minimum_observations": 3, "neutral_positive_ratio": 0.5, "positive_ratio_scale": 0.25, "aggressive_max_impact": 4},
       "margin_financing": {"scale_pct": 1.0, "trend_max_impact": 6, "institution_max_impact": 4},
       "northbound_holding": {"institution_direction_impact": 6, "value_direction_impact": 3},
       "a_share_characteristics": {"neutral_score": 50, "score_span": 25, "aggressive_max_impact": 8, "trend_max_impact": 3},
       "ah_premium": {"neutral_score": 50, "neutral_premium_pct": 0, "premium_scale_pct": 50, "score_span": 10, "value_max_impact": 4, "institution_max_impact": 3},
       "turnover_continuity": {"neutral_score": 50, "score_span": 25, "aggressive_max_impact": 4, "trend_max_impact": 6},
       "tiered_money_flow": {"neutral_score": 50, "score_span": 25, "aggressive_max_impact": 6, "trend_max_impact": 8, "institution_max_impact": 5},
-      "capital_flow_continuity": {"neutral_score": 50, "score_span": 25, "aggressive_max_impact": 5, "trend_max_impact": 9, "institution_max_impact": 7},
+      "capital_flow_continuity": {"streak_scale_days": 5, "aggressive_main_max_impact": 5, "trend_margin_max_impact": 9, "institution_northbound_max_impact": 7},
       "industry_prosperity": {"neutral_score": 50, "score_span": 25, "institution_max_impact": 8, "value_max_impact": 5, "policy_max_impact": 8},
       "intraday": {"imbalance_scale": 0.2, "aggressive_max_impact": 6, "trend_max_impact": 6, "reversal_max_impact": 5}
     }

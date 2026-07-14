@@ -175,6 +175,12 @@ def assess_investment_faction_committee(
         "cross_examination": _court_cross_examination(factions),
         "risk_challenge": _risk_challenge(context, findings),
         "signal_evidence": {name: signal.to_dict() for name, signal in context.signals.items()},
+        "decision_context": {
+            "dragon_tiger_signal": context.dragon_tiger_signal.to_dict(),
+            "northbound_days": context.northbound_days,
+            "margin_trend": context.margin_trend,
+            "tiered_money_flow": context.signal("tiered_money_flow").to_dict(),
+        },
     }
     return SkillInsight(
         skill="投资流派委员会",
@@ -234,6 +240,7 @@ class _Context:
     def signals(self) -> dict[str, _CommitteeSignal]:
         return {
             "dragon_tiger": _dragon_tiger_signal(self),
+            "dragon_tiger_history": _dragon_tiger_history_signal(self),
             "margin_financing": _margin_signal(self),
             "northbound_holding": _northbound_signal(self),
             "tiered_money_flow": _tiered_money_flow_signal(self),
@@ -252,6 +259,18 @@ class _Context:
 
     def signal(self, name: str) -> _CommitteeSignal:
         return self.signals[name]
+
+    @property
+    def dragon_tiger_signal(self) -> _CommitteeSignal:
+        return _dragon_tiger_signal(self)
+
+    @property
+    def northbound_days(self) -> int | None:
+        return _continuity_streak(self, "northbound_streak_days")
+
+    @property
+    def margin_trend(self) -> int | None:
+        return _continuity_streak(self, "margin_balance_streak_days")
 
     @property
     def risk_score(self) -> int:
@@ -311,6 +330,14 @@ def _dragon_tiger_signal(context: _Context) -> _CommitteeSignal:
         value = depth.get(key)
         if isinstance(value, (int, float)):
             values[key] = float(value)
+    seat_type_counts = depth.get("seat_type_counts")
+    if isinstance(seat_type_counts, dict):
+        for key, value in seat_type_counts.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values[f"seat_type_count:{key}"] = float(value)
+    known_hot_money_seat_count = depth.get("known_hot_money_seat_count")
+    if isinstance(known_hot_money_seat_count, (int, float)) and not isinstance(known_hot_money_seat_count, bool):
+        values["known_hot_money_seat_count"] = float(known_hot_money_seat_count)
     return _CommitteeSignal(
         "dragon_tiger",
         "admitted",
@@ -320,6 +347,75 @@ def _dragon_tiger_signal(context: _Context) -> _CommitteeSignal:
         source_ids,
         quality,
         ["龙虎榜只覆盖触发披露条件的交易，不能代表全部短线资金。"],
+    )
+
+
+def _dragon_tiger_history_signal(context: _Context) -> _CommitteeSignal:
+    current_signal = context.dragon_tiger_signal
+    quality = context.quality_status("dragon_tiger_history")
+    if current_signal.status != "admitted":
+        return _unavailable_signal("dragon_tiger_history", quality, "当日龙虎榜席位证据未获准，历史后效不参与计分。")
+    if quality != _committee_signal_config()["required_quality_status"]:
+        return _rejected_signal("dragon_tiger_history", quality, "龙虎榜席位历史质量未通过，不进入委员会计分。")
+    detail = context.agent_detail("龙虎榜 Agent")
+    metrics = detail.get("seat_history_metrics")
+    if not isinstance(metrics, dict):
+        return _unavailable_signal("dragon_tiger_history", quality, "缺少结构化席位历史后效。")
+    config = _committee_signal_config()["dragon_tiger_history"]
+    horizon = str(int(config["horizon_days"]))
+    minimum = int(config["minimum_observations"])
+    admitted: list[tuple[int, float]] = []
+    seat_count = 0
+    for seat_metric in metrics.values():
+        if not isinstance(seat_metric, dict) or seat_metric.get("seat_type") != "游资席位":
+            continue
+        horizons = seat_metric.get("horizons")
+        horizon_metric = horizons.get(horizon) if isinstance(horizons, dict) else None
+        if not isinstance(horizon_metric, dict):
+            continue
+        observations = horizon_metric.get("observations")
+        positive_ratio = horizon_metric.get("positive_observation_ratio")
+        if (
+            isinstance(observations, int)
+            and observations >= minimum
+            and isinstance(positive_ratio, (int, float))
+            and not isinstance(positive_ratio, bool)
+        ):
+            admitted.append((observations, float(positive_ratio)))
+            seat_count += 1
+    if not admitted:
+        return _unavailable_signal(
+            "dragon_tiger_history",
+            quality,
+            "已识别游资席位在配置观察期内没有达到最小样本要求的历史后效。",
+        )
+    observations = sum(item[0] for item in admitted)
+    positive_ratio = sum(count * ratio for count, ratio in admitted) / observations
+    source_ids = ["dragon-tiger-history-001"] if "dragon-tiger-history-001" in context.source_ids else []
+    source = next((item for item in context.evidence_sources if item.id == "dragon-tiger-history-001"), None)
+    as_of = source.as_of if source else None
+    if not source_ids or not as_of or not _date_not_after(context.analysis_date, as_of):
+        return _rejected_signal(
+            "dragon_tiger_history",
+            quality,
+            "龙虎榜席位历史来源不可追溯或观察截止日未与分析日对齐。",
+            source_ids,
+            as_of,
+        )
+    return _CommitteeSignal(
+        "dragon_tiger_history",
+        "admitted",
+        f"已识别游资席位 {seat_count} 个，{horizon}日后正收益观察占比 {positive_ratio:.0%}（席位事件 n={observations}）",
+        {
+            "seat_count": float(seat_count),
+            "horizon_days": float(horizon),
+            "observations": float(observations),
+            "positive_observation_ratio": positive_ratio,
+        },
+        as_of,
+        source_ids,
+        quality,
+        ["席位事件并非相互独立样本，历史后效是观察性证据，不代表因果、胜率或未来可复制性。"],
     )
 
 
@@ -433,6 +529,12 @@ def _capital_flow_continuity_signal(context: _Context) -> _CommitteeSignal:
     )
 
 
+def _continuity_streak(context: _Context, key: str) -> int | None:
+    signal = _capital_flow_continuity_signal(context)
+    value = signal.values.get(key) if signal.status == "admitted" else None
+    return int(value) if isinstance(value, (int, float)) else None
+
+
 def _intraday_signal(context: _Context) -> _CommitteeSignal:
     insight = context.skill("盘中分时盘口分析")
     imbalance = insight.details.get("order_book_imbalance") if insight else None
@@ -497,6 +599,10 @@ def _committee_signal_config() -> dict[str, object]:
 
 def _dates_match(analysis_date: str | None, observed_dates: list[str]) -> bool:
     return bool(analysis_date and observed_dates) and all(value.startswith(analysis_date) for value in observed_dates)
+
+
+def _date_not_after(analysis_date: str | None, observed_date: str) -> bool:
+    return bool(analysis_date and observed_date) and observed_date[:10] <= analysis_date
 
 
 def _sources_are_traceable(context: _Context, source_ids: list[str]) -> bool:
@@ -627,25 +733,27 @@ def _append_continuity_adjustment(
     context: _Context,
     adjustments: list[dict[str, object]],
     risks: list[str],
+    value_key: str,
+    label: str,
     maximum_impact_key: str,
+    reason: str,
 ) -> None:
     signal = context.signal("capital_flow_continuity")
     if signal.status != "admitted":
         _append_signal_gap(risks, signal, "资金流连续性")
         return
     config = _committee_signal_config()["capital_flow_continuity"]
-    impact = _score_signal_impact(
-        signal.values["score"],
-        float(config["neutral_score"]),
-        float(config["score_span"]),
-        int(config[maximum_impact_key]),
-    )
+    value = signal.values.get(value_key)
+    if not isinstance(value, (int, float)):
+        risks.append(f"{label}历史覆盖不足，未进入本流派计分。")
+        return
+    impact = _continuous_impact(float(value), float(config["streak_scale_days"]), int(config[maximum_impact_key]))
     adjustments.append(_signal_adjustment(
-        "多日资金连续性",
+        label,
         signal,
         impact,
-        "多日主力、北向与融资余额连续性用于质证单日资金结论是否可延续。",
-        "仅采信日期连续、来源可追溯且质量通过的历史；价资背离不等同于吸筹或派发。",
+        reason,
+        "正连续天数加分、负连续天数扣分；仅采信日期连续、来源可追溯且质量通过的历史。",
     ))
 
 
@@ -705,10 +813,13 @@ def _aggressive_hot_money(context: _Context) -> FactionView:
     adjustments.append(_score_adjustment("资金流", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，游资派要求资金连续。"))
     adjustments.append(_score_adjustment("题材强度", theme_adj, f"题材热点 Agent {context.agent('题材热点 Agent')} 分，题材越强接力越有共识。"))
     signal_config = _committee_signal_config()
-    _append_continuity_adjustment(context, adjustments, risks, "aggressive_max_impact")
+    _append_continuity_adjustment(
+        context, adjustments, risks, "main_streak_days", "主力资金连续性",
+        "aggressive_main_max_impact", "主力净流入连续天数用于质证单日龙虎榜和分档资金是否获得延续。",
+    )
     _append_skill_score_adjustment(context, adjustments, risks, "a_share_characteristics", "涨停结构", "aggressive_max_impact", "封板率、一字板和连板梯队共同质证短线情绪承接。")
     _append_skill_score_adjustment(context, adjustments, risks, "turnover_continuity", "换手连续性", "aggressive_max_impact", "多日换手变化用于区分资金活跃度延续与单日噪音。")
-    dragon = context.signal("dragon_tiger")
+    dragon = context.dragon_tiger_signal
     if dragon.status == "admitted":
         impact = _directional_impact(
             dragon.values["net_amount"],
@@ -725,9 +836,40 @@ def _aggressive_hot_money(context: _Context) -> FactionView:
                 f"披露席位集中度 {concentration:.1%}，少数席位反向交易可能放大兑现波动。",
                 "集中度只作流动性与兑现风险扣分，不推断席位操纵意图",
             ))
+        hot_money_count = dragon.values.get("known_hot_money_seat_count", 0.0)
+        if hot_money_count > 0:
+            type_config = signal_config["dragon_tiger"]
+            seat_impact = min(
+                int(type_config["identified_hot_money_max_impact"]),
+                int(round(hot_money_count * float(type_config["identified_hot_money_seat_impact"]))),
+            )
+            adjustments.append(_signal_adjustment(
+                "龙虎榜席位类型",
+                dragon,
+                seat_impact,
+                f"配置名录精确识别到 {int(hot_money_count)} 个游资席位，作为短线风格匹配证据。",
+                "只有配置的可追溯精确席位名录可加分；普通券商营业部不推断为游资",
+            ))
         rationale.append(dragon.observed)
     else:
         _append_signal_gap(risks, dragon, "龙虎榜")
+    dragon_history = context.signal("dragon_tiger_history")
+    if dragon_history.status == "admitted":
+        config = signal_config["dragon_tiger_history"]
+        impact = _continuous_impact(
+            dragon_history.values["positive_observation_ratio"] - float(config["neutral_positive_ratio"]),
+            float(config["positive_ratio_scale"]),
+            int(config["aggressive_max_impact"]),
+        )
+        adjustments.append(_signal_adjustment(
+            "龙虎榜游资席位历史后效",
+            dragon_history,
+            impact,
+            "已识别游资席位的历史后效只用于质证当前短线风格是否有观察性支持。",
+            "达到最小席位事件样本后才参与；正收益观察占比不是胜率，不代表因果",
+        ))
+    elif dragon_history.status == "rejected":
+        _append_signal_gap(risks, dragon_history, "龙虎榜席位历史")
     tiered = context.signal("tiered_money_flow")
     if tiered.status == "admitted":
         config = signal_config["tiered_money_flow"]
@@ -769,7 +911,10 @@ def _trend_capacity(context: _Context) -> FactionView:
     adjustments.append(_score_adjustment("资金承接", capital_adj, f"资金流 Agent {context.agent('资金流 Agent')} 分，决定趋势能否延续。"))
     adjustments.append(_score_adjustment("风险质量", risk_adj, f"风险扫描 {context.risk_score} 分，风险越低越能承载趋势仓位。"))
     signal_config = _committee_signal_config()
-    _append_continuity_adjustment(context, adjustments, risks, "trend_max_impact")
+    _append_continuity_adjustment(
+        context, adjustments, risks, "margin_balance_streak_days", "融资余额趋势",
+        "trend_margin_max_impact", "融资余额连续变化方向用于验证杠杆资金是否持续配合趋势。",
+    )
     _append_skill_score_adjustment(context, adjustments, risks, "turnover_continuity", "换手连续性", "trend_max_impact", "换手连续变化用于质证趋势是否获得持续参与。")
     _append_skill_score_adjustment(context, adjustments, risks, "a_share_characteristics", "涨停结构", "trend_max_impact", "市场封板结构只作为趋势风险偏好的低权重旁证。")
     margin = context.signal("margin_financing")
@@ -827,7 +972,10 @@ def _institutional_growth(context: _Context) -> FactionView:
         "行业资金、估值和盈利增速差用于质证景气成长是否具有行业基础。",
     )
     signal_config = _committee_signal_config()
-    _append_continuity_adjustment(context, adjustments, risks, "institution_max_impact")
+    _append_continuity_adjustment(
+        context, adjustments, risks, "northbound_streak_days", "北向资金连续性",
+        "institution_northbound_max_impact", "北向持股连续增减天数用于验证机构风格资金是否持续。",
+    )
     _append_ah_premium_adjustment(context, adjustments, risks, "institution_max_impact")
     northbound = context.signal("northbound_holding")
     if northbound.status == "admitted":

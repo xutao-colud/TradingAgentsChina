@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 from app.graph.workflow import build_default_workflow
@@ -90,6 +91,7 @@ class InvestmentCommitteeTest(unittest.TestCase):
         signals = committee.details["signal_evidence"]
         expected = {
             "dragon_tiger",
+            "dragon_tiger_history",
             "margin_financing",
             "northbound_holding",
             "tiered_money_flow",
@@ -98,20 +100,84 @@ class InvestmentCommitteeTest(unittest.TestCase):
         }
         self.assertTrue(all(signals[name]["status"] == "admitted" for name in expected))
         aggressive = next(item for item in committee.details["factions"] if item["name"] == "激进游资派")
+        trend = next(item for item in committee.details["factions"] if item["name"] == "趋势容量派")
         institutional = next(item for item in committee.details["factions"] if item["name"] == "机构成长派")
         aggressive_items = {item["item"]: item for item in aggressive["score_adjustments"]}
+        trend_items = {item["item"]: item for item in trend["score_adjustments"]}
         institutional_items = {item["item"]: item for item in institutional["score_adjustments"]}
         self.assertIn("龙虎榜净额", aggressive_items)
         self.assertIn("盘口委托不平衡", aggressive_items)
         self.assertIn("北向持股变化", institutional_items)
         self.assertIn("融资融券活动", institutional_items)
-        self.assertIn("多日资金连续性", aggressive_items)
-        self.assertIn("多日资金连续性", institutional_items)
+        self.assertIn("龙虎榜席位类型", aggressive_items)
+        self.assertIn("龙虎榜游资席位历史后效", aggressive_items)
+        self.assertIn("主力资金连续性", aggressive_items)
+        self.assertIn("融资余额趋势", trend_items)
+        self.assertIn("北向资金连续性", institutional_items)
         self.assertIn("行业景气度", institutional_items)
         self.assertEqual(institutional_items["行业景气度"]["evidence_status"], "admitted")
         self.assertEqual(aggressive_items["龙虎榜净额"]["source_ids"], ["dragon-tiger-001"])
         self.assertEqual(aggressive_items["龙虎榜净额"]["as_of"], "2026-07-10")
         self.assertEqual(aggressive_items["龙虎榜净额"]["evidence_status"], "admitted")
+        self.assertEqual(committee.details["decision_context"]["northbound_days"], 5)
+        self.assertEqual(committee.details["decision_context"]["margin_trend"], 4)
+        self.assertEqual(
+            committee.details["decision_context"]["dragon_tiger_signal"]["status"],
+            "admitted",
+        )
+        self.assertIn("正收益观察占比", signals["dragon_tiger_history"]["observed"])
+        self.assertNotIn("胜率", signals["dragon_tiger_history"]["observed"])
+
+    def test_continuity_components_only_move_their_intended_factions(self) -> None:
+        findings, insights = _committee_baseline()
+        common = {
+            "analysis_date": "2026-07-10",
+            "market_signals": _market_signals(positive=True),
+            "money_flow": _money_flow(positive=True),
+            "intraday": IntradaySnapshot(
+                "verified", "2026-07-10 14:55:00",
+                source_ids=["intraday-bars-001", "order-book-001"],
+            ),
+            "evidence_sources": _evidence_sources(),
+            "quality_reports": _quality_reports(),
+        }
+        north_positive = assess_investment_faction_committee(
+            findings, _with_continuity(insights, main=2, northbound=5, margin=0), [], **common,
+        )
+        north_negative = assess_investment_faction_committee(
+            findings, _with_continuity(insights, main=2, northbound=-5, margin=0), [], **common,
+        )
+        self.assertGreater(
+            _faction_score(north_positive, "机构成长派"),
+            _faction_score(north_negative, "机构成长派"),
+        )
+        self.assertEqual(
+            _faction_score(north_positive, "激进游资派"),
+            _faction_score(north_negative, "激进游资派"),
+        )
+        self.assertEqual(
+            _faction_score(north_positive, "趋势容量派"),
+            _faction_score(north_negative, "趋势容量派"),
+        )
+
+        margin_positive = assess_investment_faction_committee(
+            findings, _with_continuity(insights, main=2, northbound=0, margin=5), [], **common,
+        )
+        margin_negative = assess_investment_faction_committee(
+            findings, _with_continuity(insights, main=2, northbound=0, margin=-5), [], **common,
+        )
+        self.assertGreater(
+            _faction_score(margin_positive, "趋势容量派"),
+            _faction_score(margin_negative, "趋势容量派"),
+        )
+        self.assertEqual(
+            _faction_score(margin_positive, "激进游资派"),
+            _faction_score(margin_negative, "激进游资派"),
+        )
+        self.assertEqual(
+            _faction_score(margin_positive, "机构成长派"),
+            _faction_score(margin_negative, "机构成长派"),
+        )
 
     def test_a_share_characteristic_signals_enter_relevant_court_routes(self) -> None:
         findings, insights = _committee_baseline()
@@ -234,6 +300,28 @@ def _committee_baseline(positive: bool = True) -> tuple[list[AgentFinding], list
         AgentFinding("技术分析 Agent", "趋势", 62, 0.7),
         AgentFinding("资金流 Agent", "承接", 60, 0.7),
         AgentFinding("题材热点 Agent", "扩散", 60, 0.7),
+        AgentFinding(
+            "龙虎榜 Agent", "席位结构已核验", 60, 0.7,
+            source_ids=["dragon-tiger-001", "dragon-tiger-history-001"],
+            details={
+                "buy_concentration": 0.4,
+                "sell_concentration": 0.3,
+                "seat_type_counts": {"游资席位": 1, "机构专用": 1},
+                "known_hot_money_seat_count": 1,
+                "seat_history_metrics": {
+                    "配置游资席位": {
+                        "seat_type": "游资席位",
+                        "horizons": {
+                            "3": {
+                                "observations": 4,
+                                "median_return_pct": 2.0,
+                                "positive_observation_ratio": 0.75,
+                            }
+                        },
+                    }
+                },
+            },
+        ),
     ]
     tier_score = 70 if positive else 30
     imbalance = 0.2 if positive else -0.2
@@ -289,6 +377,28 @@ def _market_signals(positive: bool) -> AshareMarketSignals:
     )
 
 
+def _with_continuity(
+    insights: list[SkillInsight],
+    *,
+    main: int,
+    northbound: int,
+    margin: int,
+) -> list[SkillInsight]:
+    updated: list[SkillInsight] = []
+    for insight in insights:
+        if insight.skill != "资金流连续性分析":
+            updated.append(insight)
+            continue
+        details = dict(insight.details)
+        details.update({
+            "main_streak_days": main,
+            "northbound_streak_days": northbound,
+            "margin_balance_streak_days": margin,
+        })
+        updated.append(replace(insight, details=details))
+    return updated
+
+
 def _money_flow(positive: bool) -> MoneyFlowSnapshot:
     direction = 1 if positive else -1
     return MoneyFlowSnapshot(
@@ -308,6 +418,7 @@ def _money_flow(positive: bool) -> MoneyFlowSnapshot:
 def _evidence_sources() -> list[EvidenceSource]:
     return [
         EvidenceSource("dragon-tiger-001", "龙虎榜", "tushare_top_list", "2026-07-10"),
+        EvidenceSource("dragon-tiger-history-001", "龙虎榜席位历史", "tushare_top_inst", "2026-07-10"),
         EvidenceSource("margin-001", "融资融券", "tushare_margin_detail", "2026-07-10"),
         EvidenceSource("northbound-001", "北向持股", "tushare_hk_hold", "2026-07-10"),
         EvidenceSource("flow-001", "资金分档", "tushare_moneyflow", "2026-07-10"),
@@ -325,6 +436,7 @@ def _evidence_sources() -> list[EvidenceSource]:
 def _quality_reports() -> list[DataQualityReport]:
     return [
         DataQualityReport("tushare", "dragon_tiger", "passed", 1, 1, 1.0, "2026-07-10"),
+        DataQualityReport("tushare", "dragon_tiger_history", "passed", 4, 4, 1.0, "2026-07-10"),
         DataQualityReport("tushare", "margin_financing", "passed", 1, 1, 1.0, "2026-07-10"),
         DataQualityReport("tushare", "northbound_holding", "passed", 1, 1, 1.0, "2026-07-10"),
         DataQualityReport("tushare", "capital_flow_history", "passed", 5, 5, 1.0, "2026-07-10"),

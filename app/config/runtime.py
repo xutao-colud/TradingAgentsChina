@@ -196,6 +196,7 @@ def _validate(data: object) -> None:
     required_signal_keys = {
         "required_quality_status",
         "dragon_tiger",
+        "dragon_tiger_history",
         "margin_financing",
         "northbound_holding",
         "tiered_money_flow",
@@ -213,6 +214,25 @@ def _validate(data: object) -> None:
         raise RuntimeError("committee signals must require passed semantic quality")
     if committee_signals["margin_financing"]["scale_pct"] <= 0 or committee_signals["intraday"]["imbalance_scale"] <= 0:
         raise RuntimeError("committee signal scales must be positive")
+    dragon_signal = committee_signals["dragon_tiger"]
+    if dragon_signal["identified_hot_money_seat_impact"] < 0 or dragon_signal["identified_hot_money_max_impact"] < 0:
+        raise RuntimeError("committee dragon-tiger seat scoring impacts cannot be negative")
+    dragon_history_signal = committee_signals.get("dragon_tiger_history")
+    if not isinstance(dragon_history_signal, dict):
+        raise RuntimeError("scoring.committee_signals.dragon_tiger_history is required")
+    if (
+        dragon_history_signal["horizon_days"] not in dragon_depth["forward_return_horizons"]
+        or dragon_history_signal["minimum_observations"] < dragon_depth["minimum_history_observations"]
+        or not 0 <= dragon_history_signal["neutral_positive_ratio"] <= 1
+        or dragon_history_signal["positive_ratio_scale"] <= 0
+    ):
+        raise RuntimeError("committee dragon-tiger history scoring configuration is invalid")
+    continuity_signal = committee_signals["capital_flow_continuity"]
+    if continuity_signal["streak_scale_days"] <= 0 or any(
+        continuity_signal[key] < 0
+        for key in ("aggressive_main_max_impact", "trend_margin_max_impact", "institution_northbound_max_impact")
+    ):
+        raise RuntimeError("committee capital-flow continuity scoring configuration is invalid")
     peer_config = settings.get("providers", "tushare", "fundamental_peers")
     if peer_config["maximum_members"] < settings.get("data_quality", "datasets", "fundamental_peers", "minimum_records"):
         raise RuntimeError("tushare.fundamental_peers.maximum_members cannot be below the required sample count")

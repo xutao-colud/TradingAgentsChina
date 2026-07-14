@@ -63,10 +63,14 @@ def analyze_dragon_tiger(
         seat_type: sum(_seat_type(item.seat_name, config) == seat_type for item in seats)
         for seat_type in sorted(seat_types)
     }
+    known_hot_money_seat_count = sum(
+        _seat_type(item.seat_name, config) == "游资席位"
+        for item in seats
+    )
     reason_types = [_reason_type(item.reason, config) for item in records]
     analysis_date = max(item.trade_date for item in records)
     observed_prices = [item for item in list(prices or []) if item.trade_date <= analysis_date]
-    history_summary = _seat_history_summary(
+    history_summary, seat_history_metrics = _seat_history_analysis(
         seats,
         list(seat_history or []),
         observed_prices,
@@ -104,9 +108,11 @@ def analyze_dragon_tiger(
             "net_buy_amount": net_buy,
             "institution_net_amount": institution_net,
             "seat_type_counts": seat_type_counts,
+            "known_hot_money_seat_count": known_hot_money_seat_count,
             "buy_concentration": buy_concentration,
             "sell_concentration": sell_concentration,
             "reason_types": reason_types,
+            "seat_history_metrics": seat_history_metrics,
         },
     )
 
@@ -162,20 +168,21 @@ def _concentration(seats: list[DragonTigerSeatRecord], field: str, top_n: int) -
     return sum(sorted(amounts, reverse=True)[:top_n]) / total if total > 0 else None
 
 
-def _seat_history_summary(
+def _seat_history_analysis(
     current_seats: list[DragonTigerSeatRecord],
     history: list[DragonTigerSeatRecord],
     prices: list[DailyPrice],
     config: dict[str, object],
-) -> list[str]:
+) -> tuple[list[str], dict[str, dict[str, object]]]:
     current_names = {item.seat_name for item in current_seats}
     if not current_names or not history or not prices:
-        return []
+        return [], {}
     ordered_prices = sorted(prices, key=lambda item: item.trade_date)
     price_index = {item.trade_date: index for index, item in enumerate(ordered_prices)}
     horizons = [int(item) for item in config["forward_return_horizons"]]
     events = {(item.seat_name, item.trade_date): item for item in history if item.seat_name in current_names}
     lines: list[str] = []
+    metrics: dict[str, dict[str, object]] = {}
     for seat_name in sorted(current_names):
         seat_events = [item for (name, _), item in events.items() if name == seat_name]
         horizon_values: dict[int, list[float]] = {horizon: [] for horizon in horizons}
@@ -193,14 +200,25 @@ def _seat_history_summary(
         if not available:
             continue
         parts = []
+        horizon_metrics: dict[str, dict[str, float | int | None]] = {}
         for horizon, values in available.items():
             part = f"{horizon}日后中位数 {median(values):+.2f}%（n={len(values)}）"
+            positive_ratio: float | None = None
             if len(values) >= int(config["minimum_history_observations"]):
                 positive_ratio = sum(value > 0 for value in values) / len(values)
                 part += f"，正收益观察占比 {positive_ratio:.0%}"
             parts.append(part)
+            horizon_metrics[str(horizon)] = {
+                "observations": len(values),
+                "median_return_pct": median(values),
+                "positive_observation_ratio": positive_ratio,
+            }
+        metrics[seat_name] = {
+            "seat_type": _seat_type(seat_name, config),
+            "horizons": horizon_metrics,
+        }
         lines.append(f"席位后效｜{seat_name}：{'；'.join(parts)}。")
-    return lines
+    return lines, metrics
 
 
 def _mapping_line(values: dict[str, int]) -> str:

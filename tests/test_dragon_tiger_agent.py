@@ -43,10 +43,14 @@ class DragonTigerAgentTest(unittest.TestCase):
 
         self.assertEqual(finding.details["reason_types"], ["turnover"])
         self.assertEqual(finding.details["seat_type_counts"], {"券商营业部": 1, "机构专用": 1})
+        self.assertEqual(finding.details["known_hot_money_seat_count"], 0)
         self.assertGreater(finding.details["buy_concentration"], 0.7)
         self.assertTrue(any("正收益观察占比" in item for item in finding.evidence))
         self.assertFalse(any("胜率" in item for item in finding.evidence))
         self.assertIn("dragon-tiger-history-001", finding.source_ids)
+        institution_history = finding.details["seat_history_metrics"]["机构专用"]["horizons"]["3"]
+        self.assertEqual(institution_history["observations"], 3)
+        self.assertIsNotNone(institution_history["positive_observation_ratio"])
 
     def test_same_seat_on_both_rankings_is_not_double_counted(self) -> None:
         duplicated = [
@@ -58,6 +62,7 @@ class DragonTigerAgentTest(unittest.TestCase):
         finding = analyze_dragon_tiger(AshareMarketSignals("verified", dragon_tiger=[record]))
 
         self.assertEqual(finding.details["seat_type_counts"], {"券商营业部": 1})
+        self.assertEqual(finding.details["known_hot_money_seat_count"], 0)
         self.assertEqual(finding.details["buy_concentration"], 1.0)
 
 
