@@ -325,9 +325,14 @@ class ResearchWebApp:
             report = replace(report, name=quote.name)
         model_name = "deterministic-mvp"
         if payload.get("model_explain") is True or payload.get("deepseek_explain") is True:
-            report = self.model_runtime.explain(report, context)
-            status = self.model_runtime.status()
-            model_name = f"{status['active_provider']}:{status['active_model']}"
+            report = self.model_runtime.explain(
+                report,
+                context,
+                expected_provider_id=_optional_string(payload.get("model_provider_id")),
+                expected_model=_optional_string(payload.get("model_name")),
+            )
+            execution = report.model_execution or {}
+            model_name = f"{execution.get('provider_id', 'unknown')}:{execution.get('model', 'unknown')}"
 
         event = self.memory_store.save_analysis(report, user_query=question, model_name=model_name)
         interaction = self.memory_store.save_interaction_summary(report, question, event.id)

@@ -412,6 +412,7 @@ class AnalysisReport:
     user_question: str | None = None
     realtime_quote: dict[str, Any] | None = None
     model_interpretation: str | None = None
+    model_execution: dict[str, Any] | None = None
     rule_version: str = "unknown"
     config_source: str = "unknown"
     analysis_level: int = 3

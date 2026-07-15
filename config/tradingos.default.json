@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-15.19",
+  "rule_version": "2026-07-15.20",
   "runtime": {
     "network_timeout_seconds": 8,
     "network_retry": {"max_attempts": 2, "initial_backoff_seconds": 0.25, "max_backoff_seconds": 1.0},

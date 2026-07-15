@@ -142,6 +142,35 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(status["active_provider"], "glm")
             self.assertNotIn("session-secret-key", str(status))
 
+    def test_analysis_binds_and_persists_the_selected_model_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def fake_post(url, headers, payload):
+                self.assertEqual(payload["model"], "qwen-plus")
+                return {"choices": [{"message": {"content": "通义千问解释。"}}]}
+
+            runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)
+            runtime.configure("qwen", "session-secret-key", "qwen-plus")
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                model_runtime=runtime,
+            )
+            result = app.analyze(
+                {
+                    "symbol": "600519",
+                    "analysis_date": "2026-07-10",
+                    "model_explain": True,
+                    "model_provider_id": "qwen",
+                    "model_name": "qwen-plus",
+                }
+            )
+
+            self.assertEqual(result["model_interpretation"], "通义千问解释。")
+            self.assertEqual(result["model_execution"]["provider_id"], "qwen")
+            self.assertEqual(result["model_execution"]["model"], "qwen-plus")
+            saved = app.memory_store.recent_analyses("600519.SH", limit=1)[0]
+            self.assertEqual(saved["payload"]["model_name"], "qwen:qwen-plus")
+
     def test_analysis_can_attach_labelled_realtime_context(self) -> None:
         response = 'var hq_str_sh600519="贵州茅台,10,1500,1515,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-11,14:30:00";'
         with tempfile.TemporaryDirectory() as tmpdir:

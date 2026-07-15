@@ -53,7 +53,9 @@ function renderModels(status) {
   $("modelName").value = status.active_model || "";
   const active = status.providers.find((provider) => provider.id === status.active_provider);
   renderModelProviderIdentity(active);
-  text($("modelStatus"), active?.configured ? `${active.name} 已配置（密钥来源：${active.key_source}）。可勾选报告解释。` : `${active?.name || "当前模型"} 未配置。页面输入的密钥只保存到当前服务会话；重启后请重新输入或使用 ${active?.env_key || "环境变量"}。`);
+  const last = status.last_execution;
+  const executionText = last ? ` 最近执行：${last.provider_name}/${last.model} · ${last.status}。` : "";
+  text($("modelStatus"), (active?.configured ? `${active.name} 已配置（密钥来源：${active.key_source}）。可勾选报告解释。` : `${active?.name || "当前模型"} 未配置。页面输入的密钥只保存到当前服务会话；重启后请重新输入或使用 ${active?.env_key || "环境变量"}。`) + executionText);
 }
 
 function renderModelProviderIdentity(provider) {
@@ -274,7 +276,10 @@ function renderReport(report) {
   state.committee = normalizeCommitteeCourt(committee);
   $("committeeButton").hidden = !state.committee;
   if (state.committee) renderCommitteeCourt(state.committee);
-  const model = $("modelSection"); model.hidden = !report.model_interpretation; text($("modelInterpretation"), report.model_interpretation);
+  const model = $("modelSection"); model.hidden = !report.model_interpretation;
+  const execution = report.model_execution;
+  text($("modelInterpretationTitle"), execution ? `${execution.provider_name} · ${execution.model} 解释` : "模型解释");
+  text($("modelInterpretation"), report.model_interpretation);
 }
 
 function normalizeCommitteeCourt(committee) {
@@ -447,6 +452,10 @@ $("analysisForm").addEventListener("submit", async (event) => {
   event.preventDefault(); const button = $("analyzeButton"); button.disabled = true; text($("formMessage"), "正在运行市场、技术、资金、风险与个人画像 Skills…");
   try {
     const payload = { symbol: $("symbol").value.trim(), analysis_date: $("analysisDate").value, question: $("question").value.trim(), model_explain: $("modelExplain").checked, include_realtime: true };
+    if (payload.model_explain) {
+      payload.model_provider_id = $("modelProvider").value;
+      payload.model_name = $("modelName").value.trim();
+    }
     const { data } = await api("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
     state.lastSymbol = data.symbol; renderReport(data); openCommittee(); text($("formMessage"), `已保存分析与问答摘要 · ${data.memory_event_id.slice(0, 8)}`); await loadDashboard();
   } catch (error) { text($("formMessage"), `未完成：${error.message}`); } finally { button.disabled = false; }
@@ -480,10 +489,9 @@ $("clearModelKey").addEventListener("click", async () => {
 $("modelProvider").addEventListener("change", () => {
   const provider = selectedModelProvider();
   renderModelProviderIdentity(provider);
-  if (provider && ($("modelName").value.trim() === "" || state.activeProviderId !== provider.id)) {
-    $("modelName").value = provider.default_model;
-  }
-  state.activeProviderId = provider?.id || null;
+  if (provider) $("modelName").value = provider.default_model;
+  const active = state.modelProviders.find((item) => item.id === state.activeProviderId);
+  text($("modelStatus"), `${provider?.name || "所选服务商"} 尚未保存；当前生效仍为 ${active?.name || "后端配置"}。请先配置并保存，再开始研判。`);
 });
 
 $("refreshMarket").addEventListener("click", refreshMarket);

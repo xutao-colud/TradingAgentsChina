@@ -35,19 +35,22 @@ class OpenAICompatibleClient:
 
     def explain(self, report: AnalysisReport, memory_context: dict[str, Any]) -> AnalysisReport:
         request_config = load_runtime_settings().get("runtime", "llm_request")
-        response = self._post_json(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            {
-                "model": self.model,
-                "temperature": request_config["temperature"],
-                "max_tokens": request_config["max_tokens"],
-                "messages": [
-                    {"role": "system", "content": _system_prompt()},
-                    {"role": "user", "content": _build_user_message(report, memory_context)},
-                ],
-            },
-        )
+        try:
+            response = self._post_json(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                {
+                    "model": self.model,
+                    "temperature": request_config["temperature"],
+                    "max_tokens": request_config["max_tokens"],
+                    "messages": [
+                        {"role": "system", "content": _system_prompt()},
+                        {"role": "user", "content": _build_user_message(report, memory_context)},
+                    ],
+                },
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"{self.provider_name} model {self.model} request failed: {exc}") from exc
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -90,14 +93,17 @@ class DeepSeekClient:
             ],
         }
         request_payload.update(self.config.extra_body())
-        response = self._post_json(
-            f"{self.config.base_url.rstrip('/')}/chat/completions",
-            {
-                "Authorization": f"Bearer {self.config.api_key}",
-                "Content-Type": "application/json",
-            },
-            request_payload,
-        )
+        try:
+            response = self._post_json(
+                f"{self.config.base_url.rstrip('/')}/chat/completions",
+                {
+                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Content-Type": "application/json",
+                },
+                request_payload,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(f"DeepSeek model {self.config.model} request failed: {exc}") from exc
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
@@ -127,7 +133,7 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"DeepSeek API returned HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"Model API returned HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
         if is_outbound_access_denied(exc.reason if isinstance(exc.reason, Exception) else exc):
             raise RuntimeError(
@@ -138,7 +144,7 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("DeepSeek API returned invalid JSON") from exc
+        raise RuntimeError("Model API returned invalid JSON") from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError("DeepSeek API returned a non-object response")
+        raise RuntimeError("Model API returned a non-object response")
     return parsed
