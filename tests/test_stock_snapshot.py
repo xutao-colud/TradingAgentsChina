@@ -81,6 +81,25 @@ class StockSnapshotTest(unittest.TestCase):
         self.assertEqual(snapshot.data_status, "unavailable")
         self.assertTrue(snapshot.error)
 
+    def test_uses_configured_delayed_host_for_quote_and_money_flow(self) -> None:
+        quote_payload = {"data": {"f43": 638, "f57": "000725", "f58": "京东方Ａ", "f60": 702, "f127": "光学光电子", "f170": -912}}
+        flow_payload = {"data": {"klines": ["2026-07-15,-2361915648.0,2169782272.0,192133376.0,-843372032.0,-1518543616.0,-11.95,10.98,0.97,-4.27,-7.69,6.38,-9.12"]}}
+
+        def fetch_text(url: str) -> str:
+            if "push2delay.eastmoney.com" not in url:
+                raise OSError("primary peer disconnected")
+            return json.dumps(flow_payload if "fflow" in url else quote_payload, ensure_ascii=False)
+
+        client = EastmoneyStockSnapshotClient(fetch_text=fetch_text, now=lambda: datetime(2026, 7, 15, 10, 0, 0))
+        snapshot = client.fetch_snapshot("000725")
+
+        self.assertEqual(snapshot.source, "eastmoney_push2delay")
+        self.assertEqual(snapshot.data_status, "latest_available")
+        self.assertEqual(snapshot.name, "京东方A")
+        self.assertEqual(snapshot.price, 6.38)
+        self.assertIsNotNone(snapshot.money_flow)
+        self.assertEqual(snapshot.money_flow.main_net_inflow, -2_361_915_648)
+
 
 if __name__ == "__main__":
     unittest.main()

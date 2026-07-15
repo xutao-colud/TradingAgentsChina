@@ -217,9 +217,13 @@ function renderMorningRadar(snapshot) {
   text($("morningRadarMessage"), `${snapshot.shortline_read}${snapshot.error ? ` 数据源提示：${snapshot.error}` : ""}`);
   const inflow = $("sectorInflow"); const outflow = $("sectorOutflow"); const movers = $("fastMovers");
   const trackedOnly = snapshot.data_status === "tracked_universe";
+  const postMarketSectorFallback = snapshot.source === "tushare_moneyflow_ind_ths";
   inflow.replaceChildren(); outflow.replaceChildren(); movers.replaceChildren();
-  (snapshot.top_inflow_sectors || []).forEach((item) => inflow.append(radarRow(item.name, `涨跌 ${percentage(item.change_pct)} · 占比 ${percentage(item.main_net_inflow_ratio)}`, yi(item.main_net_inflow), "up")));
-  (snapshot.top_outflow_sectors || []).forEach((item) => outflow.append(radarRow(item.name, `涨跌 ${percentage(item.change_pct)} · 占比 ${percentage(item.main_net_inflow_ratio)}`, yi(item.main_net_inflow), "down")));
+  const sectorMeta = (item) => postMarketSectorFallback
+    ? `最近完整交易日 · 涨跌 ${percentage(item.change_pct)} · 净额`
+    : `涨跌 ${percentage(item.change_pct)} · 占比 ${percentage(item.main_net_inflow_ratio)}`;
+  (snapshot.top_inflow_sectors || []).forEach((item) => inflow.append(radarRow(item.name, sectorMeta(item), yi(item.main_net_inflow), "up")));
+  (snapshot.top_outflow_sectors || []).forEach((item) => outflow.append(radarRow(item.name, sectorMeta(item), yi(item.main_net_inflow), "down")));
   (snapshot.fast_movers || []).forEach((item) => movers.append(radarRow(`${item.name} ${item.symbol}`, `${percentage(item.change_pct)} · 涨速 ${percentage(item.speed_pct)} · ${item.trigger_reason}`, yi(item.amount), item.change_pct >= 0 ? "up" : "down")));
   if (!inflow.children.length) inflow.append(emptyRadar());
   if (!outflow.children.length) outflow.append(emptyRadar());
@@ -230,6 +234,9 @@ function renderMorningRadar(snapshot) {
     movers.replaceChildren();
     (snapshot.fast_movers || []).forEach((item) => movers.append(trackedMoverRow(item)));
     if (!movers.children.length) movers.append(radarUnavailableRow("当前自选、持仓与机会池中没有可核验报价。"));
+  }
+  if (postMarketSectorFallback && !movers.children.length) {
+    movers.replaceChildren(radarUnavailableRow("备选源为盘后行业资金，不提供盘中急拉个股。"));
   }
 }
 

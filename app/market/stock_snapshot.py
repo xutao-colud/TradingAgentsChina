@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.market.realtime import RealtimeQuote
@@ -107,26 +107,39 @@ class EastmoneyStockSnapshotClient:
         normalized = normalize_symbol(symbol)
         now = self._now()
         try:
-            quote_payload = _load_json(self._request_text(_quote_url(normalized)))
+            quote_raw, quote_source = self._request_text(_quote_url(normalized), "stock_url", "stock_fallback_urls")
+            quote_payload = _load_json(quote_raw)
             quote_data = quote_payload.get("data")
             if not isinstance(quote_data, dict):
                 raise ValueError(f"No quote data returned for {normalized}")
-            flow = self.fetch_money_flow(normalized)
-            return _snapshot_from_data(normalized, quote_data, flow, now)
+            flow, flow_source = self._fetch_money_flow_with_source(normalized)
+            source = _combined_source(quote_source, flow_source)
+            return _snapshot_from_data(
+                normalized,
+                quote_data,
+                flow,
+                now,
+                source=source,
+                force_latest_available="eastmoney_push2delay" in source,
+            )
         except (OSError, URLError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
             return _unavailable_snapshot(normalized, str(exc), now)
 
     def fetch_money_flow(self, symbol: str) -> StockMoneyFlowBreakdown | None:
-        payload = _load_json(self._request_text(_flow_url(symbol)))
+        return self._fetch_money_flow_with_source(symbol)[0]
+
+    def _fetch_money_flow_with_source(self, symbol: str) -> tuple[StockMoneyFlowBreakdown | None, str]:
+        raw, source = self._request_text(_flow_url(symbol), "flow_url", "flow_fallback_urls")
+        payload = _load_json(raw)
         data = payload.get("data")
         if not isinstance(data, dict):
-            return None
+            return None, source
         klines = data.get("klines")
         if not isinstance(klines, list) or not klines:
-            return None
+            return None, source
         latest = str(klines[-1]).split(",")
         if len(latest) < 11:
-            return None
+            return None, source
         main = _num(latest[1])
         small = _num(latest[2])
         medium = _num(latest[3])
@@ -142,10 +155,20 @@ class EastmoneyStockSnapshotClient:
             main_net_inflow_ratio=_num(latest[6]),
             visible_large_net_inflow=_sum_optional(super_large, large),
             hidden_follow_net_inflow=_sum_optional(medium, small),
-        )
+        ), source
 
-    def _request_text(self, url: str) -> str:
-        return retry_call(lambda: self._fetch_text(url), operation_name="Eastmoney stock snapshot")
+    def _request_text(self, url: str, primary_key: str, fallback_key: str) -> tuple[str, str]:
+        settings = load_runtime_settings().get("providers", "eastmoney")
+        query = urlsplit(url).query
+        errors: list[Exception] = []
+        for base_url in [settings[primary_key], *settings[fallback_key]]:
+            candidate = base_url + (f"?{query}" if query else "")
+            try:
+                raw = retry_call(lambda: self._fetch_text(candidate), operation_name="Eastmoney stock snapshot")
+                return raw, _eastmoney_source(candidate)
+            except (OSError, URLError) as exc:
+                errors.append(exc)
+        raise OSError(f"All configured Eastmoney stock endpoints failed: {errors[-1] if errors else 'no endpoint'}")
 
 
 def _quote_url(symbol: str) -> str:
@@ -181,6 +204,8 @@ def _snapshot_from_data(
     data: dict[str, object],
     flow: StockMoneyFlowBreakdown | None,
     now: datetime,
+    source: str = "eastmoney_push2",
+    force_latest_available: bool = False,
 ) -> StockRealtimeSnapshot:
     return StockRealtimeSnapshot(
         symbol=symbol,
@@ -202,7 +227,8 @@ def _snapshot_from_data(
         concepts=_split_concepts(_text(data.get("f129"))),
         money_flow=flow,
         as_of=now.isoformat(timespec="seconds"),
-        data_status=_data_status(now),
+        source=source,
+        data_status="latest_available" if force_latest_available else _data_status(now),
     )
 
 
@@ -234,7 +260,13 @@ def _unavailable_snapshot(symbol: str, error: str, now: datetime) -> StockRealti
 
 def _fetch_text(url: str) -> str:
     endpoints = load_runtime_settings().get("providers", "eastmoney")
-    if not (url.startswith(endpoints["stock_url"]) or url.startswith(endpoints["flow_url"])):
+    allowed = [
+        endpoints["stock_url"],
+        endpoints["flow_url"],
+        *endpoints["stock_fallback_urls"],
+        *endpoints["flow_fallback_urls"],
+    ]
+    if not any(url.startswith(item) for item in allowed):
         raise ValueError("Blocked stock snapshot URL")
     request = Request(url, headers=endpoints["headers"])
     try:
@@ -269,6 +301,15 @@ def _fetch_text_with_curl(url: str) -> str:
     if completed.returncode != 0 or not completed.stdout.strip():
         raise OSError((completed.stderr or "curl returned no data").strip())
     return completed.stdout
+
+
+def _eastmoney_source(url: str) -> str:
+    host = (urlsplit(url).hostname or "unknown").split(".", 1)[0]
+    return f"eastmoney_{host}"
+
+
+def _combined_source(*sources: str) -> str:
+    return "+".join(dict.fromkeys(sources))
 
 
 def _load_json(raw: str) -> dict[str, object]:

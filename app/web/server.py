@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
+from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
 from app.portfolio.snapshot import build_portfolio_snapshot, quote_advice
 
@@ -41,8 +43,10 @@ class ResearchWebApp:
         self.workflow = workflow or build_default_workflow()
         self.mcp_server = McpToolServer(provider=self.workflow.provider, memory_store=memory_store)
         self.quote_client = quote_client or SinaRealtimeQuoteClient()
+        sector_fallback = _build_sector_radar_fallback(self.workflow.provider)
         self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient(
-            quote_fetcher=self.quote_client.fetch_quotes
+            quote_fetcher=self.quote_client.fetch_quotes,
+            secondary_fetcher=sector_fallback.fetch_snapshot if sector_fallback else None,
         )
         self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
         self.model_runtime = model_runtime or ModelRuntime(memory_store.root / "model_settings.json")
@@ -152,11 +156,24 @@ class ResearchWebApp:
             for item in watchlist
             if item["symbol"] in quotes
         ]
-        source = "eastmoney_push2"
-        if missing_quote_symbols and snapshots:
-            source = "eastmoney_push2+sina_fallback"
-        elif not snapshots:
+        verified_eastmoney_symbols = {
+            symbol
+            for symbol, snapshot in snapshots.items()
+            if snapshot.data_status != "unavailable" and snapshot.price is not None
+        }
+        verified_eastmoney_sources = list(dict.fromkeys(
+            snapshot.source
+            for symbol, snapshot in snapshots.items()
+            if symbol in verified_eastmoney_symbols
+        ))
+        if verified_eastmoney_symbols and missing_quote_symbols:
+            source = "+".join([*verified_eastmoney_sources, "sina_fallback"])
+        elif verified_eastmoney_symbols:
+            source = "+".join(verified_eastmoney_sources)
+        elif quotes:
             source = "sina"
+        else:
+            source = "unavailable"
         return {
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
@@ -336,7 +353,6 @@ class ResearchWebApp:
 
 class TradingDeskHandler(BaseHTTPRequestHandler):
     app: ResearchWebApp
-    allow_secret_configuration = True
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/health":
@@ -393,12 +409,12 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/opportunities/replay":
                 self._write_json(HTTPStatus.OK, self.app.replay_opportunity(payload))
             elif self.path == "/api/models/configure":
-                if not self.allow_secret_configuration:
+                if not self._is_local_client():
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
                 else:
                     self._write_json(HTTPStatus.OK, self.app.configure_model(payload))
             elif self.path == "/api/models/clear":
-                if not self.allow_secret_configuration:
+                if not self._is_local_client():
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
                 else:
                     self._write_json(HTTPStatus.OK, self.app.clear_model_key(payload))
@@ -423,6 +439,10 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise ValueError("JSON body must be an object")
         return payload
+
+    def _is_local_client(self) -> bool:
+        """Allow secret entry only from a loopback connection, never by headers."""
+        return _is_loopback_address(self.client_address[0])
 
     def _serve_static(self) -> None:
         path_map = {
@@ -480,8 +500,14 @@ def create_server(host: str | None = None, port: int | None = None, memory_dir: 
         workflow=build_production_workflow() if provider_name == "production" else build_sample_workflow(),
         stock_snapshot_client=snapshot_client,
     )
-    TradingDeskHandler.allow_secret_configuration = host in {"127.0.0.1", "localhost", "::1"}
     return ThreadingHTTPServer((host, port), TradingDeskHandler)
+
+
+def _build_sector_radar_fallback(provider: object) -> TushareIndustryRadarFallback | None:
+    ranking = getattr(provider, "get_industry_flow_ranking", None)
+    if not callable(ranking):
+        return None
+    return TushareIndustryRadarFallback(provider)  # type: ignore[arg-type]
 
 
 def main() -> None:
@@ -508,6 +534,13 @@ def main() -> None:
 
 def _optional_string(value: Any) -> str | None:
     return str(value) if value is not None else None
+
+
+def _is_loopback_address(value: str) -> bool:
+    try:
+        return ip_address(value).is_loopback
+    except ValueError:
+        return False
 
 
 def _optional_float(value: Any) -> float | None:

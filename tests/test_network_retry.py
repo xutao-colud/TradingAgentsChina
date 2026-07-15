@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.network.retry import RetryExhaustedError, RetryPolicy, retry_call
+from app.network.retry import RetryExhaustedError, RetryPolicy, is_outbound_access_denied, retry_call
 
 
 class RetryCallTest(unittest.TestCase):
@@ -44,6 +44,24 @@ class RetryCallTest(unittest.TestCase):
                 sleep=lambda _: self.fail("nonrecoverable failures must not sleep"),
             )
         self.assertEqual(attempts, 1)
+
+    def test_does_not_retry_local_socket_access_denial(self) -> None:
+        attempts = 0
+
+        def denied() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise OSError("[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions")
+
+        with self.assertRaises(OSError):
+            retry_call(
+                denied,
+                operation_name="test provider",
+                policy=RetryPolicy(3, 0.1, 0.5),
+                sleep=lambda _: self.fail("socket access denial must not sleep"),
+            )
+        self.assertEqual(attempts, 1)
+        self.assertTrue(is_outbound_access_denied(OSError("[WinError 10013] socket access denied")))
 
     def test_marks_exhausted_transient_failure_with_attempt_count(self) -> None:
         attempts = 0

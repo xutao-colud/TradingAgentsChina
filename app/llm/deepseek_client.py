@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from app.llm.config import DeepSeekConfig
 from app.llm.prompt_contracts import build_explanation_system_prompt, build_explanation_user_message
 from app.config.runtime import load_runtime_settings
+from app.network.retry import is_outbound_access_denied
 from app.schemas.report import AnalysisReport
 
 
@@ -128,7 +129,12 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"DeepSeek API returned HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Unable to reach DeepSeek API: {exc.reason}") from exc
+        if is_outbound_access_denied(exc.reason if isinstance(exc.reason, Exception) else exc):
+            raise RuntimeError(
+                "Outbound network access was denied by this device or network policy. "
+                "Check firewall, endpoint security, proxy, or network egress before retrying the model request."
+            ) from exc
+        raise RuntimeError(f"Unable to reach external model API: {exc.reason}") from exc
     try:
         parsed = json.loads(body)
     except json.JSONDecodeError as exc:

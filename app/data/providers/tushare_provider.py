@@ -490,6 +490,69 @@ class TushareMarketDataProvider(MarketDataProvider):
         self._industry_contexts[cache_key] = context
         return context
 
+    def get_industry_flow_ranking(
+        self,
+        reference_date: str,
+        calendar_lookback_days: int,
+    ) -> tuple[str, list[IndustryFlowObservation]]:
+        """Return the latest validated all-industry flow dataset at or before a date.
+
+        ``moneyflow_ind_ths`` is a daily post-market interface.  Callers must
+        therefore label this result as a latest-available snapshot, never as
+        intraday data.
+        """
+        try:
+            reference = date.fromisoformat(_iso_date(reference_date))
+        except ValueError:
+            return reference_date, []
+        if not self.configured:
+            return reference.isoformat(), []
+
+        for offset in range(max(1, calendar_lookback_days)):
+            requested_date = (reference - timedelta(days=offset)).isoformat()
+            raw_start = len(self._raw_snapshots)
+            errors_before = len(self._errors)
+            rows = self._query("industry_moneyflow", trade_date=_compact_date(requested_date))
+            if not rows and len(self._errors) > errors_before:
+                return reference.isoformat(), []
+            snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[raw_start:]]
+            flows = [
+                IndustryFlowObservation(
+                    trade_date=_iso_date(_text(row, "trade_date")),
+                    industry=_text(row, "industry"),
+                    industry_code=_text(row, "ts_code"),
+                    net_amount=_number(row, "net_amount") * 100_000_000,
+                    pct_change=_optional_number(row, "pct_change"),
+                    company_count=_optional_int(row, "company_num"),
+                    source_id="industry-flow-radar-001",
+                )
+                for row in rows
+                if _text(row, "trade_date") and _text(row, "industry") and _text(row, "ts_code")
+            ]
+            as_of = max((item.trade_date for item in flows), default=requested_date)
+            if as_of > reference.isoformat():
+                flows = [item for item in flows if item.trade_date <= reference.isoformat()]
+                as_of = max((item.trade_date for item in flows), default=requested_date)
+            flows = [item for item in flows if item.trade_date == as_of]
+            flows, quality = validate_dataset_records(
+                provider="tushare",
+                dataset="industry_flow",
+                records=flows,
+                analysis_date=as_of,
+                snapshot_ids=snapshot_ids,
+            )
+            self._quality_reports[("__market__", as_of, "industry_flow_radar")] = quality
+            if flows and quality.status == "passed":
+                self._record_evidence(
+                    "industry-flow-radar-001",
+                    f"{as_of} Tushare 同花顺全行业资金流向",
+                    "tushare_moneyflow_ind_ths",
+                    as_of,
+                    snapshot_ids,
+                )
+                return as_of, list(flows)
+        return reference.isoformat(), []
+
     def _industry_valuation_history(
         self,
         symbol: str,

@@ -169,7 +169,7 @@ Watchlist and portfolio data are included in `trading-agents-memory.json` export
 
 ### Morning money radar
 
-The dashboard includes a short-line `早盘资金雷达` panel. It ranks sector main-force inflow, sector outflow, and fast-moving stocks through `MorningMoneyRadarClient`. When the public provider is unavailable it returns `unavailable` and no sample movers; offline samples are available only through explicit test/demo helpers. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
+The dashboard includes a short-line `早盘资金雷达` panel. It uses a strict source chain: Eastmoney real-time market-wide radar first; then authenticated Tushare `moneyflow_ind_ths` as a **post-market, latest-available** industry-flow fallback; then Sina quotes scoped only to watchlist/positions/opportunity-pool symbols. The latter two must never be described as market-wide intraday money flow. If no source is verifiable it returns `unavailable` and no sample movers. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
 
 ## Switchable A-share playbooks
 

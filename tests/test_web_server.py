@@ -10,10 +10,16 @@ from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
 from app.graph.workflow import build_sample_workflow
-from app.web.server import ResearchWebApp
+from app.web.server import ResearchWebApp, _is_loopback_address
 
 
 class ResearchWebAppTest(unittest.TestCase):
+    def test_model_secret_access_is_limited_to_loopback_clients(self) -> None:
+        self.assertTrue(_is_loopback_address("127.0.0.1"))
+        self.assertTrue(_is_loopback_address("::1"))
+        self.assertFalse(_is_loopback_address("192.168.1.8"))
+        self.assertFalse(_is_loopback_address("untrusted-host"))
+
     def test_dashboard_runs_and_reads_persisted_opportunity_pool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             app = ResearchWebApp(
@@ -109,7 +115,7 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(snapshot["money_flow"]["main_net_inflow"], -5088655104.0)
             self.assertEqual(snapshot["money_flow"]["visible_large_net_inflow"], -5088655104.0)
             self.assertEqual(snapshot["money_flow"]["hidden_follow_net_inflow"], 5088655104.0)
-            self.assertEqual(market["source"], "eastmoney_push2")
+            self.assertEqual(market["source"], "eastmoney_push2+eastmoney_push2his")
 
     def test_dashboard_refresh_falls_back_to_sina_price_when_snapshot_is_unavailable(self) -> None:
         response = 'var hq_str_sz000725="京东方A,7.20,7.10,7.25,0,0,0,0,100,725000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-13,10:15:00";'
@@ -123,7 +129,7 @@ class ResearchWebAppTest(unittest.TestCase):
             app.add_watchlist({"symbol": "000725", "note": "验证价格兜底"})
             market = app.refresh_market()
 
-            self.assertEqual(market["source"], "eastmoney_push2+sina_fallback")
+            self.assertEqual(market["source"], "sina")
             self.assertEqual(market["watchlist"][0]["quote"]["source"], "sina")
             self.assertEqual(market["watchlist"][0]["quote"]["price"], 7.25)
             self.assertEqual(market["watchlist"][0]["snapshot"]["data_status"], "unavailable")
