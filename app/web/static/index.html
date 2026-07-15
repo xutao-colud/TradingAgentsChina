@@ -27,6 +27,21 @@
             <label class="toggle wide"><input id="modelExplain" type="checkbox"><span>使用当前配置模型解释报告与实时行情上下文</span></label>
             <button id="analyzeButton" type="submit">开始研判 <b>↗</b></button>
           </form>
+          <div id="analysisProgress" class="analysis-progress" data-state="idle" hidden role="status" aria-live="polite">
+            <div class="analysis-progress__head">
+              <div class="analysis-progress__signal"><i aria-hidden="true"></i><span id="analysisProgressTitle">研判管线准备中</span></div>
+              <time id="analysisProgressElapsed" datetime="PT0S">00:00</time>
+            </div>
+            <div id="analysisProgressTrack" class="analysis-progress__track" role="progressbar" aria-label="研判进度" aria-valuetext="尚未开始">
+              <span class="analysis-progress__fill"></span>
+            </div>
+            <p id="analysisProgressDetail" class="analysis-progress__detail">准备参数并校验模型配置。</p>
+            <ol class="analysis-progress__phases" aria-label="研判阶段">
+              <li data-progress-phase="prepare"><i>01</i><span>请求校验</span></li>
+              <li data-progress-phase="research"><i>02</i><span>证据链研判</span></li>
+              <li data-progress-phase="present"><i>03</i><span>报告归档</span></li>
+            </ol>
+          </div>
           <p id="formMessage" class="muted">行情与资金实时优先；财务、公告和市场宽度仍有样例兜底，研究结论不构成投资建议。</p>
         </article>
 

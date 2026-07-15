@@ -1,4 +1,4 @@
-const state = { lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null };
+const state = { lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null, analysisProgressTimer: null, analysisStartedAt: null };
 
 const $ = (id) => document.getElementById(id);
 
@@ -65,6 +65,79 @@ function renderModelProviderIdentity(provider) {
 
 function selectedModelProvider() {
   return state.modelProviders.find((provider) => provider.id === $("modelProvider").value);
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+function setAnalysisPhases(statuses) {
+  document.querySelectorAll("[data-progress-phase]").forEach((phase) => {
+    phase.classList.remove("is-active", "is-complete", "is-failed");
+    const status = statuses[phase.dataset.progressPhase];
+    if (status) phase.classList.add(`is-${status}`);
+  });
+}
+
+function startAnalysisProgress(payload) {
+  const root = $("analysisProgress");
+  const track = $("analysisProgressTrack");
+  if (state.analysisProgressTimer) clearInterval(state.analysisProgressTimer);
+  state.analysisStartedAt = Date.now();
+  root.hidden = false;
+  root.dataset.state = "running";
+  track.removeAttribute("aria-valuenow");
+  track.removeAttribute("aria-invalid");
+  track.setAttribute("aria-valuetext", "服务端研判处理中");
+  text($("analysisProgressTitle"), "证据链研判中");
+  text($("analysisProgressElapsed"), "00:00");
+  $("analysisProgressElapsed").setAttribute("datetime", "PT0S");
+  text(
+    $("analysisProgressDetail"),
+    `已提交 ${payload.symbol} · 数据采集 → 确定性 Skills → 法庭质证${payload.model_explain ? " → 模型解释" : ""}。服务端完成后进入归档。`,
+  );
+  setAnalysisPhases({ prepare: "complete", research: "active" });
+  state.analysisProgressTimer = setInterval(() => {
+    const elapsed = Date.now() - state.analysisStartedAt;
+    text($("analysisProgressElapsed"), formatElapsed(elapsed));
+    $("analysisProgressElapsed").setAttribute("datetime", `PT${Math.floor(elapsed / 1000)}S`);
+  }, 1000);
+}
+
+function finishAnalysisProgress(outcome, detail) {
+  const root = $("analysisProgress");
+  const track = $("analysisProgressTrack");
+  if (state.analysisProgressTimer) clearInterval(state.analysisProgressTimer);
+  state.analysisProgressTimer = null;
+  const elapsed = state.analysisStartedAt ? Date.now() - state.analysisStartedAt : 0;
+  text($("analysisProgressElapsed"), formatElapsed(elapsed));
+  $("analysisProgressElapsed").setAttribute("datetime", `PT${Math.floor(elapsed / 1000)}S`);
+  root.dataset.state = outcome;
+  if (outcome === "success") {
+    track.setAttribute("aria-valuenow", "100");
+    track.setAttribute("aria-valuetext", "研判和归档已完成");
+    text($("analysisProgressTitle"), "研判完成 · 已归档");
+    text($("analysisProgressDetail"), detail);
+    setAnalysisPhases({ prepare: "complete", research: "complete", present: "complete" });
+  } else {
+    track.removeAttribute("aria-valuenow");
+    track.setAttribute("aria-invalid", "true");
+    track.setAttribute("aria-valuetext", "研判未完成");
+    text($("analysisProgressTitle"), "研判中断 · 未写入结论");
+    text($("analysisProgressDetail"), detail);
+    setAnalysisPhases({ prepare: "complete", research: "failed" });
+  }
+}
+
+function setAnalyzeButton(running) {
+  const button = $("analyzeButton");
+  button.replaceChildren(document.createTextNode(running ? "研判进行中 " : "开始研判 "));
+  const mark = document.createElement("b");
+  text(mark, running ? "···" : "↗");
+  button.append(mark);
 }
 
 function scoreTile(label, value) {
@@ -449,16 +522,18 @@ async function loadDashboard() {
 }
 
 $("analysisForm").addEventListener("submit", async (event) => {
-  event.preventDefault(); const button = $("analyzeButton"); button.disabled = true; text($("formMessage"), "正在运行市场、技术、资金、风险与个人画像 Skills…");
+  event.preventDefault(); const button = $("analyzeButton"); button.disabled = true; setAnalyzeButton(true); text($("formMessage"), "正在运行市场、技术、资金、风险与个人画像 Skills…");
+  let payload;
   try {
-    const payload = { symbol: $("symbol").value.trim(), analysis_date: $("analysisDate").value, question: $("question").value.trim(), model_explain: $("modelExplain").checked, include_realtime: true };
+    payload = { symbol: $("symbol").value.trim(), analysis_date: $("analysisDate").value, question: $("question").value.trim(), model_explain: $("modelExplain").checked, include_realtime: true };
     if (payload.model_explain) {
       payload.model_provider_id = $("modelProvider").value;
       payload.model_name = $("modelName").value.trim();
     }
+    startAnalysisProgress(payload);
     const { data } = await api("/api/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    state.lastSymbol = data.symbol; renderReport(data); openCommittee(); text($("formMessage"), `已保存分析与问答摘要 · ${data.memory_event_id.slice(0, 8)}`); await loadDashboard();
-  } catch (error) { text($("formMessage"), `未完成：${error.message}`); } finally { button.disabled = false; }
+    state.lastSymbol = data.symbol; renderReport(data); finishAnalysisProgress("success", `${data.name}（${data.symbol}）报告已生成，分析与问答摘要已写入本地记忆。`); openCommittee(); text($("formMessage"), `已保存分析与问答摘要 · ${data.memory_event_id.slice(0, 8)}`); await loadDashboard();
+  } catch (error) { finishAnalysisProgress("error", error.message); text($("formMessage"), `未完成：${error.message}`); } finally { button.disabled = false; setAnalyzeButton(false); }
 });
 
 $("feedbackForm").addEventListener("submit", async (event) => {
