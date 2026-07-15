@@ -77,6 +77,57 @@ class AnnouncementImpactTest(unittest.TestCase):
         self.assertEqual(len(insight.details["market_reactions"]), 1)
         self.assertEqual(insight.details["market_reactions"][0]["source_ids"], ["ann-a", "ann-b"])
 
+    def test_realtime_material_drop_is_kept_as_observational_counter_evidence(self) -> None:
+        forecast = Announcement(
+            "2026年半年度业绩预告",
+            "2026-07-09",
+            "company",
+            "positive",
+            "",
+            "forecast-1",
+            event_type="earnings_forecast",
+            report_period="2026-06-30",
+            forecast_net_profit_min_yuan=5_000_000_000,
+            forecast_net_profit_max_yuan=5_500_000_000,
+            published_timestamp="2026-07-09T19:05:00",
+            supporting_source_ids=["forecast-detail-1"],
+        )
+        quote = {
+            "price": 6.38,
+            "change_pct": -9.12,
+            "volume": 30_112_728,
+            "amount": 19_757_452_199.2,
+            "trade_date": "2026-07-15",
+            "trade_time": "2026-07-15T17:19:47",
+            "source": "eastmoney_push2delay",
+            "data_status": "latest_available",
+        }
+
+        insight = analyze_announcement_impact([forecast], [], "2026-07-15", quote)
+
+        self.assertEqual(insight.stage, "公告后显著异动待归因")
+        self.assertEqual(insight.details["forecast_coverage"]["status"], "structured")
+        self.assertEqual(insight.details["realtime_reaction"]["direction"], "negative")
+        self.assertIn("realtime-quote-001", insight.details["source_ids"])
+        self.assertTrue(any("不能单独证明" in risk for risk in insight.risks))
+
+    def test_title_only_forecast_is_not_misreported_as_missing_announcement(self) -> None:
+        forecast = Announcement(
+            "2026年半年度业绩预告",
+            "2026-07-09",
+            "company",
+            "neutral",
+            "",
+            "forecast-title-1",
+            event_type="earnings_forecast",
+            report_period="2026-06-30",
+        )
+
+        insight = analyze_announcement_impact([forecast], [], "2026-07-15")
+
+        self.assertEqual(insight.details["forecast_coverage"]["status"], "title_only")
+        self.assertTrue(any("不得降级表述" in risk for risk in insight.risks))
+
 
 if __name__ == "__main__":
     unittest.main()

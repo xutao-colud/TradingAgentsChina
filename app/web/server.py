@@ -22,6 +22,7 @@ from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
 from app.portfolio.snapshot import build_portfolio_snapshot, quote_advice
+from app.rules.trading_rules import normalize_symbol
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -286,28 +287,43 @@ class ResearchWebApp:
 
         question = str(payload.get("question") or f"分析 {symbol}（{analysis_date}）")
         context = self.memory_store.build_context(symbol)
+        realtime_quote: dict[str, object] | None = None
+        quote = None
+        if payload.get("include_realtime") is True:
+            try:
+                if self.stock_snapshot_client:
+                    snapshot = self.stock_snapshot_client.fetch_snapshot(symbol)
+                    quote = snapshot.to_quote() if snapshot.data_status != "unavailable" and snapshot.price is not None else None
+                    if quote is None:
+                        quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
+                else:
+                    quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
+                realtime_quote = (
+                    quote.to_dict()
+                    if quote
+                    else {
+                        "symbol": normalize_symbol(symbol),
+                        "data_status": "unavailable",
+                        "error": "No verified realtime quote was returned by the configured providers.",
+                    }
+                )
+            except ValueError as exc:
+                realtime_quote = {
+                    "symbol": normalize_symbol(symbol),
+                    "data_status": "unavailable",
+                    "error": str(exc),
+                }
+            context["realtime_quote"] = realtime_quote
         report = self.workflow.run(
             symbol,
             analysis_date,
             trading_profile=self.memory_store.load_profile(),
             user_question=question,
+            realtime_quote=realtime_quote,
         )
+        if quote and report.name in {report.symbol, report.symbol.split(".")[0]} and quote.name:
+            report = replace(report, name=quote.name)
         model_name = "deterministic-mvp"
-        if payload.get("include_realtime") is True:
-            try:
-                if self.stock_snapshot_client:
-                    snapshot = self.stock_snapshot_client.fetch_snapshot(report.symbol)
-                    quote = snapshot.to_quote() if snapshot.data_status != "unavailable" and snapshot.price is not None else None
-                    if quote is None:
-                        quote = self.quote_client.fetch_quotes([report.symbol]).get(report.symbol)
-                else:
-                    quote = self.quote_client.fetch_quotes([symbol]).get(report.symbol)
-                if quote:
-                    report = replace(report, realtime_quote=quote.to_dict())
-                    context["realtime_quote"] = quote.to_dict()
-            except ValueError as exc:
-                report = replace(report, realtime_quote={"symbol": report.symbol, "data_status": "unavailable", "error": str(exc)})
-                context["realtime_quote"] = report.realtime_quote
         if payload.get("model_explain") is True or payload.get("deepseek_explain") is True:
             report = self.model_runtime.explain(report, context)
             status = self.model_runtime.status()

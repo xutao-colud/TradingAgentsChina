@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
@@ -293,7 +294,9 @@ class AkshareSupplementProvider(ProviderAdapter):
         config = load_runtime_settings().get("domain_knowledge", "announcement_timeliness")
         start = (date.fromisoformat(analysis_date) - timedelta(days=int(config["calendar_lookback_days"]))).strftime("%Y%m%d")
         rows: list[dict[str, Any]] = []
-        announcement_calls_ok = True
+        successful_markets: list[str] = []
+        failed_markets: list[str] = []
+        announcement_snapshot_ids: list[str] = []
         for market in self.config["announcement_markets"]:
             params = {
                 "symbol": code,
@@ -304,7 +307,11 @@ class AkshareSupplementProvider(ProviderAdapter):
                 "end_date": analysis_date.replace("-", ""),
             }
             rows.extend(self._call("announcement", **params))
-            announcement_calls_ok = announcement_calls_ok and self._last_call_succeeded("announcement", **params)
+            announcement_snapshot_ids.extend(self._snapshot_ids_for_call("announcement", params))
+            if self._last_call_succeeded("announcement", **params):
+                successful_markets.append(market)
+            else:
+                failed_markets.append(market)
         items: list[Announcement] = []
         sources: list[EvidenceSource] = []
         for row in rows:
@@ -316,6 +323,8 @@ class AkshareSupplementProvider(ProviderAdapter):
             if not title or not published_at or published_at > analysis_date:
                 continue
             event_type, sentiment, priority = _announcement_classification(title, config)
+            published_timestamp = _timestamp_text(row, "公告时间")
+            report_period = _report_period_from_title(title, config)
             url = _text(row, "公告链接", "网址") or None
             source_id = "announcement-cninfo-" + hashlib.sha256(
                 f"{code}|{published_at}|{title}|{url or ''}".encode("utf-8")
@@ -328,43 +337,140 @@ class AkshareSupplementProvider(ProviderAdapter):
                 summary="巨潮资讯公告标题记录；正文条件需通过公告链接核验。",
                 source_id=source_id,
                 event_type=event_type,
+                report_period=report_period,
                 url=url,
+                published_timestamp=published_timestamp,
             ))
             sources.append(EvidenceSource(
                 source_id,
                 f"{code} {title}",
                 "akshare_cninfo_disclosure",
-                published_at,
+                published_timestamp or published_at,
                 url=url,
-                snapshot_ids=self._snapshot_ids(("announcement",), normalized, analysis_date),
+                snapshot_ids=_unique_text(announcement_snapshot_ids),
             ))
+
+        forecast_periods = sorted({
+            item.report_period
+            for item in items
+            if item.event_type == "earnings_forecast" and item.report_period
+        })
+        forecast_details: dict[str, dict[str, Any]] = {}
+        forecast_records: list[dict[str, Any]] = []
+        forecast_snapshot_ids: list[str] = []
+        forecast_query_failed = False
+        for report_period in forecast_periods:
+            snapshot_start = len(self._raw_snapshots)
+            params = {"date": report_period.replace("-", "")}
+            forecast_rows = self._call("earnings_forecast", **params)
+            snapshots = self._raw_snapshots[snapshot_start:]
+            snapshot_ids = [item.snapshot_id for item in snapshots] or self._snapshot_ids_for_call("earnings_forecast", params)
+            forecast_snapshot_ids.extend(snapshot_ids)
+            forecast_query_failed = forecast_query_failed or not self._last_call_succeeded("earnings_forecast", **params)
+            detail = _select_earnings_forecast_detail(
+                forecast_rows,
+                code=code,
+                report_period=report_period,
+                analysis_date=analysis_date,
+                provider_config=self.config,
+                announcement_config=config,
+            )
+            if detail is None:
+                continue
+            detail_source_id = "forecast-detail-akshare-" + hashlib.sha256(
+                f"{code}|{report_period}|{detail['published_at']}|{detail['metric']}".encode("utf-8")
+            ).hexdigest()[:12]
+            detail["source_id"] = detail_source_id
+            forecast_details[report_period] = detail
+            forecast_records.append(detail)
+            sources.append(EvidenceSource(
+                detail_source_id,
+                f"{code} {report_period} 业绩预告结构化明细",
+                "akshare_stock_yjyg_em",
+                detail["published_at"],
+                snapshot_ids=snapshot_ids,
+            ))
+
+        enriched_items: list[Announcement] = []
+        for item in items:
+            detail = forecast_details.get(item.report_period or "")
+            if item.event_type != "earnings_forecast" or detail is None:
+                enriched_items.append(item)
+                continue
+            enriched_items.append(replace(
+                item,
+                sentiment=detail["sentiment"],
+                summary=detail["summary"],
+                forecast_net_profit_min_yuan=detail["forecast_min_yuan"],
+                forecast_net_profit_max_yuan=detail["forecast_max_yuan"],
+                supporting_source_ids=[detail["source_id"]],
+            ))
+        items = enriched_items
+
+        if forecast_periods:
+            forecast_records, forecast_quality = validate_dataset_records(
+                provider="akshare",
+                dataset="earnings_forecast_details",
+                records=forecast_records,
+                analysis_date=analysis_date,
+                snapshot_ids=_unique_text(forecast_snapshot_ids),
+            )
+            if forecast_query_failed:
+                forecast_quality = replace(
+                    forecast_quality,
+                    status="warning" if forecast_records else "failed",
+                    issues=[
+                        *forecast_quality.issues,
+                        DataQualityIssue(
+                            code="provider_query_failed",
+                            severity="warning" if forecast_records else "error",
+                            message="AkShare earnings-forecast detail query was only partially available.",
+                        ),
+                    ],
+                )
+            self._quality_reports[(normalized, analysis_date, "earnings_forecast_details")] = forecast_quality
+
         items = list({item.source_id: item for item in items}.values())
+        quality_snapshot_ids = _unique_text([
+            *announcement_snapshot_ids,
+            *forecast_snapshot_ids,
+        ])
         items, quality = validate_dataset_records(
             provider="akshare",
             dataset="announcements",
             records=items,
             analysis_date=analysis_date,
-            snapshot_ids=self._snapshot_ids(("announcement",), normalized, analysis_date),
+            snapshot_ids=quality_snapshot_ids,
         )
-        if not announcement_calls_ok:
+        if failed_markets:
+            has_verified_records = bool(items and successful_markets)
             quality = replace(
                 quality,
-                status="failed",
+                status="warning" if has_verified_records else "failed",
                 issues=[
                     *quality.issues,
                     DataQualityIssue(
-                        code="provider_query_failed",
-                        severity="error",
-                        message="One or more CNInfo announcement queries failed; inquiry coverage is incomplete.",
+                        code="provider_coverage_incomplete",
+                        severity="warning" if has_verified_records else "error",
+                        message=(
+                            "CNInfo announcement coverage is partial; failed channels: "
+                            + ", ".join(failed_markets)
+                            + ". Existing records remain valid, but absence claims are not allowed."
+                        ),
                     ),
                 ],
             )
         self._quality_reports[(normalized, analysis_date, "announcements")] = quality
         valid_ids = {item.source_id for item in items}
-        if announcement_calls_ok:
+        supporting_ids = {
+            source_id
+            for item in items
+            for source_id in item.supporting_source_ids
+        }
+        if successful_markets:
             sources.append(EvidenceSource(
                 "announcement-coverage-cninfo-001",
-                f"{code} 巨潮资讯公告覆盖",
+                f"{code} 巨潮资讯已完成通道：{', '.join(successful_markets)}",
                 "akshare_cninfo_disclosure",
                 analysis_date,
                 snapshot_ids=quality.snapshot_ids,
@@ -372,7 +478,7 @@ class AkshareSupplementProvider(ProviderAdapter):
         self._announcement_sources[(normalized, analysis_date)] = list({
             item.id: item
             for item in sources
-            if item.id in valid_ids or item.id == "announcement-coverage-cninfo-001"
+            if item.id in valid_ids or item.id in supporting_ids or item.id == "announcement-coverage-cninfo-001"
         }.values())
         return items
 
@@ -384,7 +490,22 @@ class AkshareSupplementProvider(ProviderAdapter):
 
     def get_raw_snapshots(self, symbol: str, analysis_date: str) -> list[RawDataSnapshot]:
         normalized = normalize_symbol(symbol)
-        return [item for item in self._raw_snapshots if snapshot_matches(item, normalized, analysis_date)]
+        referenced_ids = {
+            snapshot_id
+            for (report_symbol, report_date, _), report in self._quality_reports.items()
+            if report_symbol in {normalized, "__market__"} and report_date == analysis_date
+            for snapshot_id in report.snapshot_ids
+        }
+        referenced_ids.update(
+            snapshot_id
+            for source in self._announcement_sources.get((normalized, analysis_date), [])
+            for snapshot_id in source.snapshot_ids
+        )
+        return [
+            item
+            for item in self._raw_snapshots
+            if item.snapshot_id in referenced_ids or snapshot_matches(item, normalized, analysis_date)
+        ]
 
     def get_data_quality_reports(self, symbol: str, analysis_date: str) -> list[DataQualityReport]:
         normalized = normalize_symbol(symbol)
@@ -618,6 +739,18 @@ class AkshareSupplementProvider(ProviderAdapter):
             if item.interface in function_names
         ]
 
+    def _snapshot_ids_for_call(self, key: str, expected_params: dict[str, object]) -> list[str]:
+        function_name = self.config["functions"][key]
+        matches = [
+            item
+            for item in self._raw_snapshots
+            if item.interface == function_name and item.request_params == expected_params
+        ]
+        if not matches:
+            return []
+        latest = max(matches, key=lambda item: item.requested_at)
+        return [latest.snapshot_id]
+
     def _market_snapshot_ids(self, analysis_date: str) -> list[str]:
         function_names = {
             self.config["functions"][key]
@@ -678,6 +811,100 @@ def _first_number_matching(row: dict[str, Any], fragment: str) -> float | None:
 def _date_text(row: dict[str, Any], key: str) -> str:
     value = _text(row, key)
     return value[:10]
+
+
+def _timestamp_text(row: dict[str, Any], key: str) -> str | None:
+    value = _text(row, key)
+    if not value:
+        return None
+    normalized = value.replace("/", "-").replace(" ", "T", 1)
+    if "T" not in normalized or normalized.endswith("T00:00:00"):
+        return None
+    return normalized
+
+
+def _report_period_from_title(title: str, config: dict[str, Any]) -> str | None:
+    for rule in config["report_period_title_patterns"]:
+        match = re.search(str(rule["pattern"]), title)
+        if match and match.groupdict().get("year"):
+            return f"{match.group('year')}-{rule['month_day']}"
+    return None
+
+
+def _select_earnings_forecast_detail(
+    rows: list[dict[str, Any]],
+    *,
+    code: str,
+    report_period: str,
+    analysis_date: str,
+    provider_config: dict[str, Any],
+    announcement_config: dict[str, Any],
+) -> dict[str, Any] | None:
+    fields = provider_config["earnings_forecast_fields"]
+    candidates = [
+        row
+        for row in rows
+        if _text(row, fields["code"]) == code
+        and (_normalized_date(_text(row, fields["published_at"])) or analysis_date) <= analysis_date
+    ]
+    if not candidates:
+        return None
+    priorities = list(provider_config["earnings_forecast_metric_priority"])
+
+    def priority(row: dict[str, Any]) -> tuple[int, str]:
+        metric = _text(row, fields["metric"])
+        rank = next((index for index, keyword in enumerate(priorities) if keyword in metric), len(priorities))
+        return rank, metric
+
+    row = min(candidates, key=priority)
+    metric = _text(row, fields["metric"])
+    if not any(keyword in metric for keyword in priorities):
+        return None
+    description = _text(row, fields["change_description"])
+    amounts = _forecast_amounts(description, provider_config["earnings_forecast_amount_units"])
+    if len(amounts) < 2:
+        return None
+    published_at = _normalized_date(_text(row, fields["published_at"]))
+    if not published_at:
+        return None
+    forecast_type = _text(row, fields["forecast_type"])
+    sentiment_text = f"{forecast_type} {description}"
+    if any(keyword in sentiment_text for keyword in announcement_config["negative_title_keywords"]):
+        sentiment = "negative"
+    elif any(keyword in sentiment_text for keyword in announcement_config["positive_title_keywords"]):
+        sentiment = "positive"
+    else:
+        sentiment = "neutral"
+    reason = _text(row, fields["reason"])
+    summary = "；".join(item for item in [description, reason] if item)
+    summary = summary[:int(provider_config["earnings_forecast_summary_max_chars"])]
+    return {
+        "code": code,
+        "report_period": report_period,
+        "published_at": published_at,
+        "metric": metric,
+        "forecast_min_yuan": min(amounts[0], amounts[1]),
+        "forecast_max_yuan": max(amounts[0], amounts[1]),
+        "change_pct": _optional_number(row, fields["change_pct"]),
+        "prior_value": _optional_number(row, fields["prior_value"]),
+        "forecast_type": forecast_type,
+        "sentiment": sentiment,
+        "summary": summary,
+    }
+
+
+def _forecast_amounts(text: str, units: dict[str, object]) -> list[float]:
+    if not text:
+        return []
+    unit_pattern = "|".join(re.escape(item) for item in sorted(units, key=len, reverse=True))
+    pattern = re.compile(rf"([-+]?\d[\d,]*(?:\.\d+)?)\s*({unit_pattern})")
+    result: list[float] = []
+    for raw_value, unit in pattern.findall(text):
+        try:
+            result.append(float(raw_value.replace(",", "")) * float(units[unit]))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def _normalized_date(value: str) -> str:
@@ -746,7 +973,11 @@ def _lookup_number(values: dict[str, object], *keys: str) -> float | None:
 def _announcement_classification(title: str, config: dict[str, Any]) -> tuple[str, str, str]:
     is_reply = any(keyword in title for keyword in config["reply_keywords"])
     is_inquiry = any(keyword in title for keyword in config["inquiry_keywords"])
-    event_type = "inquiry_reply" if is_reply and is_inquiry else "inquiry" if is_inquiry else "general"
+    mapped_type = next(
+        (event_type for keyword, event_type in config["event_type_map"].items() if keyword in title),
+        "general",
+    )
+    event_type = "inquiry_reply" if is_reply and is_inquiry else "inquiry" if is_inquiry else mapped_type
     if any(keyword in title for keyword in config["negative_title_keywords"]) and event_type != "inquiry_reply":
         sentiment = "negative"
     elif any(keyword in title for keyword in config["positive_title_keywords"]):

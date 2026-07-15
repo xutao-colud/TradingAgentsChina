@@ -85,6 +85,73 @@ class AkshareSupplementProviderTest(unittest.TestCase):
         )
         self.assertEqual(quality.status, "passed")
 
+    def test_cninfo_earnings_forecast_is_classified_and_enriched_with_real_detail_fields(self) -> None:
+        class ForecastAkshare(FakeAkshare):
+            def stock_zh_a_disclosure_report_cninfo(self, **kwargs):
+                return [{
+                    "代码": "000725",
+                    "公告标题": "2026年半年度业绩预告",
+                    "公告时间": "2026-07-09 19:05:00",
+                    "公告链接": "https://example.test/forecast",
+                }]
+
+            def stock_yjyg_em(self, **kwargs):
+                self.forecast_date = kwargs["date"]
+                return [{
+                    "股票代码": "000725",
+                    "股票简称": "京东方A",
+                    "预测指标": "归属于上市公司股东的净利润",
+                    "业绩变动": "预计2026年1-6月归母净利润盈利:500,000万元至550,000万元，同比上升54%至69%",
+                    "预测数值": 5_250_000_000,
+                    "业绩变动幅度": 61.5,
+                    "业绩变动原因": "显示业务经营改善。",
+                    "预告类型": "预增",
+                    "上年同期值": 3_246_890_000,
+                    "公告日期": "2026-07-09",
+                }]
+
+        client = ForecastAkshare()
+        provider = AkshareSupplementProvider(client=client)
+
+        items = provider.get_announcements("000725", "2026-07-15")
+        item = items[0]
+        sources = provider.get_evidence_sources("000725", "2026-07-15")
+
+        self.assertEqual(client.forecast_date, "20260630")
+        self.assertEqual(item.event_type, "earnings_forecast")
+        self.assertEqual(item.report_period, "2026-06-30")
+        self.assertEqual(item.published_timestamp, "2026-07-09T19:05:00")
+        self.assertEqual(item.forecast_net_profit_min_yuan, 5_000_000_000)
+        self.assertEqual(item.forecast_net_profit_max_yuan, 5_500_000_000)
+        self.assertEqual(item.sentiment, "positive")
+        self.assertTrue(item.supporting_source_ids)
+        self.assertTrue(any(source.source_type == "akshare_stock_yjyg_em" for source in sources))
+        detail_quality = next(
+            report for report in provider.get_data_quality_reports("000725", "2026-07-15")
+            if report.dataset == "earnings_forecast_details"
+        )
+        self.assertEqual(detail_quality.status, "passed")
+
+    def test_partial_cninfo_channel_failure_keeps_valid_records_as_warning(self) -> None:
+        class PartialAkshare(FakeAkshare):
+            def stock_zh_a_disclosure_report_cninfo(self, **kwargs):
+                if kwargs["market"] == "监管":
+                    raise OSError("regulatory endpoint unavailable")
+                return super().stock_zh_a_disclosure_report_cninfo(**kwargs)
+
+        provider = AkshareSupplementProvider(client=PartialAkshare())
+
+        items = provider.get_announcements("600519", "2026-07-10")
+        quality = next(
+            report for report in provider.get_data_quality_reports("600519", "2026-07-10")
+            if report.dataset == "announcements"
+        )
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(quality.status, "warning")
+        self.assertEqual(quality.valid_records, 2)
+        self.assertTrue(any(issue.code == "provider_coverage_incomplete" for issue in quality.issues))
+
     def test_current_market_breadth_uses_real_snapshot_interfaces(self) -> None:
         provider = AkshareSupplementProvider(client=FakeAkshare(), today=lambda: date(2026, 7, 10))
 

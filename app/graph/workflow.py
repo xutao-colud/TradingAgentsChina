@@ -22,7 +22,7 @@ from app.playbooks.evaluator import assess_active_playbook
 from app.rules.trading_rules import invalid_conditions, normalize_symbol
 from app.rules.risk_facts import enrich_stock_profile_risks
 from app.rules.special_instruments import assess_listing_stage
-from app.schemas.report import AnalysisReport
+from app.schemas.report import AnalysisReport, DataQualityReport, EvidenceSource
 from dataclasses import replace
 
 from app.skills.announcement_impact import analyze_announcement_impact
@@ -58,8 +58,9 @@ class AShareResearchWorkflow:
         trading_profile: TradingProfile | None = None,
         user_question: str | None = None,
         include_committee: bool = True,
+        realtime_quote: dict[str, object] | None = None,
     ) -> AnalysisReport:
-        state = self.prepare_state(symbol, analysis_date, trading_profile, user_question)
+        state = self.prepare_state(symbol, analysis_date, trading_profile, user_question, realtime_quote)
         self._run_domain_skills(state, include_committee=include_committee)
         return self.build_report(state, analysis_level=3 if include_committee else 2)
 
@@ -69,6 +70,7 @@ class AShareResearchWorkflow:
         analysis_date: str,
         trading_profile: TradingProfile | None = None,
         user_question: str | None = None,
+        realtime_quote: dict[str, object] | None = None,
     ) -> ResearchState:
         normalized_symbol = normalize_symbol(symbol)
         state = ResearchState(
@@ -76,6 +78,7 @@ class AShareResearchWorkflow:
             analysis_date=analysis_date,
             trading_profile=trading_profile,
             user_question=user_question,
+            realtime_quote=dict(realtime_quote) if realtime_quote else None,
         )
         self._collect_data(state)
         state.data_readiness = assess_data_readiness(
@@ -110,6 +113,13 @@ class AShareResearchWorkflow:
         state.market_context = self.provider.get_market_context(state.analysis_date)
         state.ah_premium = self.provider.get_ah_premium(state.symbol, state.analysis_date)
         sources = [*self.provider.get_evidence_sources(state.symbol, state.analysis_date), *(state.market_signals.evidence_sources if state.market_signals else [])]
+        if state.realtime_quote and state.realtime_quote.get("data_status") != "unavailable" and state.realtime_quote.get("price") is not None:
+            sources.append(EvidenceSource(
+                "realtime-quote-001",
+                f"{state.symbol} 实时行情观测",
+                str(state.realtime_quote.get("source") or "unknown"),
+                str(state.realtime_quote.get("trade_time") or state.realtime_quote.get("trade_date") or state.analysis_date),
+            ))
         state.evidence_sources = list({item.id: item for item in sources}.values())
         state.data_quality_reports = self.provider.get_data_quality_reports(state.symbol, state.analysis_date)
         state.profile = enrich_stock_profile_risks(
@@ -131,13 +141,18 @@ class AShareResearchWorkflow:
             analyze_technical(state.prices),
             analyze_capital_flow(state.money_flow, state.market_signals),
             analyze_dragon_tiger(state.market_signals, state.prices, state.dragon_tiger_history) if state.market_signals else analyze_dragon_tiger(self.provider.get_market_signals(state.symbol, state.analysis_date), state.prices, state.dragon_tiger_history),
-            analyze_announcements(state.announcements, state.prices, state.analysis_date),
+            analyze_announcements(state.announcements, state.prices, state.analysis_date, state.realtime_quote),
             analyze_theme(state.profile, state.market_context),
         ]
         if state.data_readiness:
-            confidence_cap = float(state.data_readiness.details["confidence_cap"])
             state.findings = [
-                replace(item, confidence=min(item.confidence, confidence_cap))
+                replace(
+                    item,
+                    confidence=min(
+                        item.confidence,
+                        _finding_confidence_cap(item.agent, state.data_readiness, state.data_quality_reports),
+                    ),
+                )
                 for item in state.findings
             ]
 
@@ -163,7 +178,7 @@ class AShareResearchWorkflow:
             analyze_ah_premium(state.ah_premium, state.data_quality_reports) if state.ah_premium else None,
             analyze_intraday_snapshot(state.intraday) if state.intraday else None,
             assess_listing_stage(state.profile, state.analysis_date) if state.profile.list_date else None,
-            analyze_announcement_impact(state.announcements, state.prices, state.analysis_date),
+            analyze_announcement_impact(state.announcements, state.prices, state.analysis_date, state.realtime_quote),
             scan_a_share_risks(
                 state.profile,
                 state.fundamentals,
@@ -238,10 +253,31 @@ class AShareResearchWorkflow:
             skill_insights=state.skill_insights,
             active_playbook=state.trading_profile.active_playbook if state.trading_profile else None,
             user_question=state.user_question,
+            realtime_quote=state.realtime_quote,
             rule_version=settings.rule_version,
             config_source=settings.source,
             analysis_level=analysis_level,
         )
+
+
+def _finding_confidence_cap(
+    agent: str,
+    readiness,
+    quality_reports: list[DataQualityReport],
+) -> float:
+    global_cap = float(readiness.details["confidence_cap"])
+    config = load_runtime_settings().get("scoring", "data_readiness", "domain_quality_caps")
+    domain = config.get(agent)
+    if not domain:
+        return global_cap
+    datasets = set(domain["datasets"])
+    relevant = [item for item in quality_reports if item.dataset in datasets]
+    valid = [item for item in relevant if item.valid_records > 0]
+    if not valid:
+        return min(global_cap, float(domain["failed_cap"]))
+    if all(item.status == "passed" for item in relevant):
+        return 1.0
+    return float(domain["warning_cap"])
 
 
 def build_default_workflow() -> AShareResearchWorkflow:

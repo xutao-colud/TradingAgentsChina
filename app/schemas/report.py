@@ -205,6 +205,8 @@ class Announcement:
     actual_net_profit_yuan: float | None = None
     first_announced_at: str | None = None
     url: str | None = None
+    published_timestamp: str | None = None
+    supporting_source_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -266,6 +268,8 @@ class CorporateEvent:
     actual_net_profit_yuan: float | None = None
     first_announced_at: str | None = None
     url: str | None = None
+    published_timestamp: str | None = None
+    supporting_source_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
