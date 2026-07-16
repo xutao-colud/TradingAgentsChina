@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.config.runtime import load_runtime_settings
+from app.indicators.market_breadth import evaluate_market_breadth_confirmation
 from app.schemas.report import MarketContext, SkillInsight
 from app.skills.common import clamp_score, stage_by_score
 
@@ -31,6 +32,7 @@ def assess_market_temperature(context: MarketContext) -> SkillInsight:
 
     advancers = int(context.advancers)
     decliners = int(context.decliners)
+    breadth_confirmation = evaluate_market_breadth_confirmation(context)
     breadth = advancers / max(1, advancers + decliners)
     amount_score = min(float(config["amount_cap"]), float(context.total_amount) / float(config["amount_divisor"]))
     limit_score = min(float(config["limit_up_cap"]), int(context.limit_up_count) / float(config["limit_up_divisor"])) - min(
@@ -42,6 +44,7 @@ def assess_market_temperature(context: MarketContext) -> SkillInsight:
         + (breadth - float(config["breadth_center"])) * float(config["breadth_weight"])
         + amount_score
         + limit_score
+        + breadth_confirmation.score_adjustment
     )
     final_score = clamp_score(score)
     stage = stage_by_score(final_score, "防守", "震荡", "震荡修复", "进攻")
@@ -63,7 +66,9 @@ def assess_market_temperature(context: MarketContext) -> SkillInsight:
             f"上涨比例 {breadth * 100:.1f}%",
             f"涨停/跌停 {context.limit_up_count}/{context.limit_down_count}",
             f"{context.index_name}涨跌幅 {float(context.index_change_pct):.2f}%",
+            f"广度交叉核验 {breadth_confirmation.stage}",
+            *breadth_confirmation.evidence,
         ],
-        risks=["市场温度反映整体环境，不能替代个股风险审查。", *context.unavailable_reasons],
-        details={"as_of": context.as_of},
+        risks=["市场温度反映整体环境，不能替代个股风险审查。", *breadth_confirmation.risks, *context.unavailable_reasons],
+        details={"as_of": context.as_of, "breadth_confirmation": breadth_confirmation.stage},
     )

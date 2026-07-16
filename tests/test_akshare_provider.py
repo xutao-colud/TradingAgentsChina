@@ -164,6 +164,9 @@ class AkshareSupplementProviderTest(unittest.TestCase):
         self.assertAlmostEqual(context.failed_breakout_rate, 100 / 3)
         self.assertEqual(context.board_ladder["2板"], 1)
         self.assertEqual(context.hot_money_cycle, "数据不足")
+        self.assertAlmostEqual(context.median_stock_change_pct, 0.35)
+        self.assertAlmostEqual(context.amount_weighted_change_pct, (1.2 * 1000 - 0.5 * 2000) / 3000)
+        self.assertAlmostEqual(context.top_amount_concentration_pct, 100.0)
         self.assertTrue(any(item.id == "market-001" and item.snapshot_ids for item in sources))
 
     def test_current_market_snapshot_is_never_relabelled_as_history(self) -> None:

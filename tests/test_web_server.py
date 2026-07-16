@@ -10,7 +10,7 @@ from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
 from app.graph.workflow import build_sample_workflow
-from app.web.server import ResearchWebApp, _is_loopback_address
+from app.web.server import ResearchWebApp, _is_local_machine_address, _is_loopback_address
 
 
 class ResearchWebAppTest(unittest.TestCase):
@@ -19,6 +19,14 @@ class ResearchWebAppTest(unittest.TestCase):
         self.assertTrue(_is_loopback_address("::1"))
         self.assertFalse(_is_loopback_address("192.168.1.8"))
         self.assertFalse(_is_loopback_address("untrusted-host"))
+
+    def test_model_secret_accepts_server_interface_but_rejects_other_lan_clients(self) -> None:
+        server_addresses = {"127.0.0.1", "192.168.1.8", "::1"}
+        self.assertTrue(_is_local_machine_address("127.0.0.1", server_addresses))
+        self.assertTrue(_is_local_machine_address("192.168.1.8", server_addresses))
+        self.assertTrue(_is_local_machine_address("::ffff:192.168.1.8", server_addresses))
+        self.assertFalse(_is_local_machine_address("192.168.1.20", server_addresses))
+        self.assertFalse(_is_local_machine_address("untrusted-host", server_addresses))
 
     def test_dashboard_runs_and_reads_persisted_opportunity_pool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

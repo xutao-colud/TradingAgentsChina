@@ -205,6 +205,9 @@ class SampleMarketDataProvider(MarketDataProvider):
             one_price_limit_up_count=6,
             broken_limit_up_count=16,
             board_ladder={"1板": 41, "2板": 18, "3板": 8, "4板以上": 5},
+            median_stock_change_pct=0.81,
+            amount_weighted_change_pct=0.76,
+            top_amount_concentration_pct=22.0,
             sentiment_history=[
                 MarketSentimentObservation("2026-07-08", 38, 16, 29.0, 0.6, 3, 24, 26.0, 1.2, sealed_limit_up_rate=71.0, one_price_limit_up_count=2, broken_limit_up_count=16, board_ladder={"1板": 24, "2板": 8, "3板": 4, "4板以上": 2}),
                 MarketSentimentObservation("2026-07-09", 55, 12, 23.0, 1.4, 4, 33, 31.0, 2.1, sealed_limit_up_rate=77.0, one_price_limit_up_count=4, broken_limit_up_count=16, board_ladder={"1板": 33, "2板": 12, "3板": 7, "4板以上": 3}),

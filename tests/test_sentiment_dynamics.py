@@ -34,14 +34,14 @@ class SentimentDynamicsTest(unittest.TestCase):
         self.assertEqual(dynamics.stage, "数据不足")
         self.assertIsNotNone(dynamics.insufficient_reason)
 
-    def test_market_gate_does_not_select_playbook_without_sentiment_history(self) -> None:
+    def test_market_gate_limits_research_to_defensive_route_without_sentiment_history(self) -> None:
         insight = select_market_eligible_playbooks([
             SkillInsight("A股市场温度计", "market", "震荡", 65, "", ""),
             SkillInsight("情绪周期识别", "market", "数据不足", 50, "", ""),
             SkillInsight("赚钱效应分析", "market", "一般", 65, "", ""),
         ])
-        self.assertEqual(insight.stage, "数据不足")
-        self.assertEqual(insight.details["allowed_playbooks"], [])
+        self.assertEqual(insight.stage, "情绪历史不足·防守研究")
+        self.assertEqual(insight.details["allowed_playbooks"], ["institutional_value_dividend"])
 
 
 if __name__ == "__main__":

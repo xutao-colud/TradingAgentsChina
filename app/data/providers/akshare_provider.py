@@ -19,6 +19,7 @@ from app.data.raw_snapshots import (
     snapshot_is_intact,
     snapshot_matches,
 )
+from app.indicators.market_breadth import calculate_market_breadth_facts
 from app.rules.trading_rules import normalize_symbol
 from app.schemas.report import (
     Announcement, AshareMarketSignals, CorporateEvent, DailyPrice, DataQualityIssue, DataQualityReport, EvidenceSource, IntradayBar,
@@ -45,6 +46,7 @@ class AkshareSupplementProvider(ProviderAdapter):
         enable_slow_bulk_queries: bool | None = None,
     ) -> None:
         self.config = load_runtime_settings().get("providers", "akshare")
+        self._client_injected = client is not None
         self._client = client or self._build_client()
         self._today = today or date.today
         self._raw_store = raw_store or InMemoryRawSnapshotStore()
@@ -212,6 +214,16 @@ class AkshareSupplementProvider(ProviderAdapter):
             else None
         )
         total_amount = sum(float(value) for value in amounts if value is not None) if complete_spot else None
+        breadth_config = load_runtime_settings().get("domain_knowledge", "market_breadth_confirmation")
+        breadth_facts = (
+            calculate_market_breadth_facts(
+                [float(value) for value in pct_changes if value is not None],
+                [float(value) for value in amounts if value is not None],
+                top_amount_count=int(breadth_config["top_amount_count"]),
+            )
+            if complete_spot
+            else calculate_market_breadth_facts([], [], top_amount_count=int(breadth_config["top_amount_count"]))
+        )
         failed_denominator = len(up_rows) + len(broken_rows)
         failed_rate = len(broken_rows) / failed_denominator * 100 if failed_denominator else None
         sealed_rate = len(up_rows) / failed_denominator * 100 if failed_denominator else None
@@ -243,6 +255,9 @@ class AkshareSupplementProvider(ProviderAdapter):
             "one_price_limit_up_count": one_price_count,
             "broken_limit_up_count": len(broken_rows) if calls_ok else None,
             "board_ladder": board_ladder,
+            "median_stock_change_pct": breadth_facts.median_stock_change_pct,
+            "amount_weighted_change_pct": breadth_facts.amount_weighted_change_pct,
+            "top_amount_concentration_pct": breadth_facts.top_amount_concentration_pct,
         }
         snapshot_ids = self._market_snapshot_ids(analysis_date)
         valid, quality = validate_dataset_records(
@@ -283,6 +298,9 @@ class AkshareSupplementProvider(ProviderAdapter):
             broken_limit_up_count=len(broken_rows) if verified else None,
             board_ladder=board_ladder if verified else {},
             sentiment_history=[],
+            median_stock_change_pct=breadth_facts.median_stock_change_pct if verified else None,
+            amount_weighted_change_pct=breadth_facts.amount_weighted_change_pct if verified else None,
+            top_amount_concentration_pct=breadth_facts.top_amount_concentration_pct if verified else None,
             data_status="verified" if verified else "insufficient",
             as_of=analysis_date if verified else None,
             unavailable_reasons=_unique_text(reasons),
@@ -648,6 +666,19 @@ class AkshareSupplementProvider(ProviderAdapter):
                 self._raw_snapshots.append(snapshot)
             self._call_outcomes.append((function_name, dict(kwargs), "success"))
             return records
+        bulk_config = self.config.get("bulk_snapshot_cache", {})
+        if (
+            not self._enable_slow_bulk_queries
+            and not self._client_injected
+            and key in set(bulk_config.get("request_time_cache_only", []))
+        ):
+            message = (
+                f"AkShare {function_name} requires a full-market query; "
+                "request-time fetch is disabled and no verified cache is available."
+            )
+            self._errors.append(message)
+            self._call_outcomes.append((function_name, dict(kwargs), "error"))
+            return []
         if self._client is None:
             message = "AkShare client is unavailable; install the optional package."
             self._errors.append(message)

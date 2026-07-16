@@ -41,6 +41,7 @@ from app.skills.money_making_effect import assess_money_making_effect
 from app.skills.profile_alignment import assess_profile_alignment
 from app.skills.risk_scanner import scan_a_share_risks
 from app.skills.sentiment_cycle import identify_sentiment_cycle
+from app.skills.market_breadth_confirmation import confirm_market_breadth
 from app.skills.stock_score_model import score_stock_composite
 from app.skills.theme_lifecycle import analyze_theme_lifecycle
 from app.skills.tiered_money_flow import analyze_tiered_money_flow
@@ -162,6 +163,7 @@ class AShareResearchWorkflow:
         base_insights = [
             state.data_readiness,
             assess_market_temperature(state.market_context),
+            confirm_market_breadth(state.market_context),
             identify_sentiment_cycle(state.market_context),
             assess_money_making_effect(state.market_context),
             analyze_a_share_characteristics(state.market_context),

@@ -50,7 +50,7 @@ def decide_rating(
     if data_readiness and data_readiness.score < config["readiness_threshold"]:
         confidence = round(min(confidence, data_readiness.score / 100), 2)
         return "证据不足", "关键来源不完整、时点不匹配或仍含样例数据；仅保存研究草稿，补齐数据后再评估。", confidence
-    if skill_insights and any(item.skill == "情绪周期识别" and item.stage == "数据不足" for item in skill_insights):
+    if config["sentiment_missing_is_hard_block"] and skill_insights and any(item.skill == "情绪周期识别" and item.stage == "数据不足" for item in skill_insights):
         return "证据不足", "缺少连续市场情绪观察，无法选择与情绪周期相关的战法；补齐历史观察后再评估。", min(confidence, config["sentiment_missing_confidence_cap"])
     if weighted >= config["strong_threshold"]:
         conclusion = "强烈关注"

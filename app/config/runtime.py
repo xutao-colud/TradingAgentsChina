@@ -56,6 +56,19 @@ def _validate(data: object) -> None:
         ("opportunity_pipeline", "ranking"),
         ("opportunity_pipeline", "lifecycle"),
         ("providers", "eastmoney", "kline_url"), ("providers", "eastmoney", "headers"),
+        ("providers", "high_availability", "route_order"),
+        ("providers", "high_availability", "circuit_breaker"),
+        ("providers", "high_availability", "verified_cache"),
+        ("providers", "high_availability", "source_lag"),
+        ("providers", "high_availability", "quality_summary"),
+        ("providers", "public_fallback", "tencent_kline_url"),
+        ("providers", "public_fallback", "sina_market_count_url"),
+        ("providers", "public_fallback", "sina_market_list_url"),
+        ("providers", "public_fallback", "financial_metrics"),
+        ("providers", "public_fallback", "money_flow_fields"),
+        ("providers", "public_fallback", "sina_tick_function"),
+        ("providers", "public_fallback", "sina_tick_fields"),
+        ("providers", "public_fallback", "sina_tick_direction_codes"),
         ("providers", "sina", "quote_url"), ("providers", "sina", "headers"),
         ("providers", "tushare", "token_env"), ("providers", "tushare", "interfaces"),
         ("providers", "tushare", "capabilities"),
@@ -214,6 +227,32 @@ def _validate(data: object) -> None:
         raise RuntimeError("technical.moving_average_windows must include every scoring MA window")
     if scoring_technical["ma_long"] not in technical["return_windows"]:
         raise RuntimeError("technical.return_windows must include scoring.technical.ma_long")
+    breadth = settings.get("domain_knowledge", "market_breadth_confirmation")
+    if breadth["top_amount_count"] < 1 or breadth["minimum_limit_balance"] < 0:
+        raise RuntimeError("market breadth concentration and limit-balance settings must be non-negative")
+    if not 0 <= breadth["breadth_bearish_pct"] < breadth["breadth_bullish_pct"] <= 100:
+        raise RuntimeError("market breadth bullish/bearish thresholds are invalid")
+    if breadth["neutral_band_pct"] < 0 or breadth["index_median_divergence_pct"] < 0:
+        raise RuntimeError("market breadth divergence thresholds cannot be negative")
+    if not 0 <= breadth["concentration_warning_pct"] <= 100:
+        raise RuntimeError("market breadth concentration warning must be between zero and one hundred")
+    if set(breadth["stages"]) != {"一致确认", "局部分化", "权重背离"} or any(
+        not 0 <= float(stage["confidence_cap"]) <= 1
+        for stage in breadth["stages"].values()
+    ):
+        raise RuntimeError("market breadth stages or confidence caps are invalid")
+    if not 0 <= float(breadth["insufficient_confidence_cap"]) <= 1:
+        raise RuntimeError("market breadth insufficient confidence cap must be between zero and one")
+    financial_quality = settings.get("domain_knowledge", "financial_quality")
+    if (
+        float(financial_quality["non_recurring_warning_pct"]) <= 0
+        or float(financial_quality["amount_display_divisor"]) <= 0
+        or not str(financial_quality["amount_display_unit"]).strip()
+    ):
+        raise RuntimeError("financial quality thresholds and display units are invalid")
+    public_fallback = settings.get("providers", "public_fallback")
+    if not public_fallback["fundamental_quality_fields"]:
+        raise RuntimeError("public fallback fundamental quality fields cannot be empty")
     if settings.get("data_quality", "raw_snapshots", "max_records_per_snapshot") < 1:
         raise RuntimeError("raw_snapshots.max_records_per_snapshot must be positive")
     if settings.get("providers", "akshare", "bulk_snapshot_cache", "maximum_age_minutes") <= 0:

@@ -26,11 +26,13 @@ def validate_dataset_records(
     issues: list[DataQualityIssue] = []
     valid: list[T] = []
     required_fields = tuple(config["required_fields"])
+    recommended_fields = tuple(config.get("recommended_fields", []))
     non_negative_fields = tuple(config["non_negative_fields"])
     finite_fields = tuple(config["finite_fields"])
     date_field = config["date_field"]
     unique_fields = tuple(config["unique_fields"])
     seen_unique_keys: set[tuple[str, ...]] = set()
+    missing_recommended: set[str] = set()
 
     for index, record in enumerate(records):
         row = _record_dict(record)
@@ -51,6 +53,9 @@ def validate_dataset_records(
         for field_name in required_fields:
             if _is_missing(row.get(field_name)):
                 record_issues.append(_issue("missing_required_field", "error", field_name, index))
+        for field_name in recommended_fields:
+            if _is_missing(row.get(field_name)):
+                missing_recommended.add(field_name)
         for field_name in finite_fields:
             value = row.get(field_name)
             if value is not None and not _is_finite_number(value):
@@ -115,6 +120,18 @@ def validate_dataset_records(
             )
         )
         status = "failed"
+
+    if status == "passed" and missing_recommended:
+        status = "warning"
+        issues.extend(
+            DataQualityIssue(
+                code="missing_recommended_field",
+                severity="warning",
+                message=f"Optional field {field_name} is unavailable; dependent conclusions must be downgraded.",
+                field=field_name,
+            )
+            for field_name in sorted(missing_recommended)
+        )
 
     return valid, DataQualityReport(
         provider=provider,

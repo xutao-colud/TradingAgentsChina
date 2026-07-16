@@ -20,6 +20,7 @@ from app.data.raw_snapshots import (
     build_raw_snapshot,
     snapshot_matches,
 )
+from app.indicators.market_breadth import calculate_market_breadth_facts
 from app.rules.trading_rules import infer_board, normalize_symbol
 from app.rules.special_instruments import ConvertibleBondSnapshot
 from app.schemas.report import (
@@ -148,7 +149,10 @@ class TushareMarketDataProvider(MarketDataProvider):
         balance = _latest_available_record(self._query("balancesheet", ts_code=normalized), effective_date)
         cashflow = _latest_available_record(self._query("cashflow", ts_code=normalized), effective_date)
         revenue = _optional_number(income, "total_revenue")
-        net_income = _optional_number(income, "n_income")
+        net_income = _optional_number(income, "n_income_attr_p")
+        if net_income is None:
+            net_income = _optional_number(income, "n_income")
+        deducted_net_income = _optional_number(row, "profit_dedt")
         operating_cash_flow = _optional_number(cashflow, "n_cashflow_act")
         cashflow_quality = operating_cash_flow / net_income if operating_cash_flow is not None and net_income not in {None, 0} else None
         total_assets = _optional_number(balance, "total_assets")
@@ -158,6 +162,22 @@ class TushareMarketDataProvider(MarketDataProvider):
         net_profit_margin = net_income / revenue if net_income is not None and revenue not in {None, 0} else None
         asset_turnover = revenue / total_assets if revenue is not None and total_assets not in {None, 0} else None
         equity_multiplier = total_assets / total_equity if total_assets is not None and total_equity not in {None, 0} else None
+        non_recurring_impact = (
+            net_income - deducted_net_income
+            if net_income is not None and deducted_net_income is not None
+            else None
+        )
+        non_recurring_ratio = (
+            non_recurring_impact / abs(net_income) * 100
+            if non_recurring_impact is not None and net_income not in {None, 0}
+            else None
+        )
+        scope_limitations = [
+            "结构化三表和财务指标不包含完整财报附注，异常项目仍需核验财报原文或问询回复。",
+            "行业周期需由行业景气度数据独立验证，不能从单公司财务快照推断。",
+        ]
+        if deducted_net_income is None:
+            scope_limitations.append("缺少扣非净利润，无法量化一次性损益对归母净利润的影响。")
         target_snapshot_ids = [item.snapshot_id for item in self._raw_snapshots[target_snapshot_start:]]
         if row:
             self._record_evidence(
@@ -250,6 +270,10 @@ class TushareMarketDataProvider(MarketDataProvider):
             pledge_ratio=pledge_ratio,
             pledge_as_of=pledge_as_of,
             pledge_source_id=pledge_source_id if valid_pledge else None,
+            deducted_net_income=deducted_net_income,
+            non_recurring_profit_impact=non_recurring_impact,
+            non_recurring_profit_ratio=non_recurring_ratio,
+            scope_limitations=scope_limitations,
         )
 
     def _peer_medians(
@@ -938,6 +962,12 @@ class TushareMarketDataProvider(MarketDataProvider):
             advancers = sum(value > advance_threshold for value in pct_changes.values())
             decliners = sum(value < decline_threshold for value in pct_changes.values())
             total_amount = sum(float(value) * 1000 for value in amount_values if value is not None)
+            breadth_config = load_runtime_settings().get("domain_knowledge", "market_breadth_confirmation")
+            breadth_facts = calculate_market_breadth_facts(
+                list(pct_changes.values()),
+                [float(value) for value in amount_values if value is not None],
+                top_amount_count=int(breadth_config["top_amount_count"]),
+            )
             up_rows = [row for row in limit_rows if _text(row, limit_type_field) == limit_codes["up"]]
             down_rows = [row for row in limit_rows if _text(row, limit_type_field) == limit_codes["down"]]
             broken_rows = [row for row in limit_rows if _text(row, limit_type_field) == limit_codes["broken"]]
@@ -987,6 +1017,9 @@ class TushareMarketDataProvider(MarketDataProvider):
                 one_price_limit_up_count=one_price_count,
                 broken_limit_up_count=len(broken_rows),
                 board_ladder=board_ladder,
+                median_stock_change_pct=breadth_facts.median_stock_change_pct,
+                amount_weighted_change_pct=breadth_facts.amount_weighted_change_pct,
+                top_amount_concentration_pct=breadth_facts.top_amount_concentration_pct,
             ))
             previous_limit_up_symbols = current_limit_up_symbols
             previous_first_board_symbols = first_board_symbols
@@ -1059,6 +1092,9 @@ class TushareMarketDataProvider(MarketDataProvider):
             broken_limit_up_count=current.broken_limit_up_count if current else None,
             board_ladder=dict(current.board_ladder) if current else {},
             sentiment_history=valid_history,
+            median_stock_change_pct=current.median_stock_change_pct if current else None,
+            amount_weighted_change_pct=current.amount_weighted_change_pct if current else None,
+            top_amount_concentration_pct=current.top_amount_concentration_pct if current else None,
             data_status=(
                 "verified"
                 if quality.status == "passed"

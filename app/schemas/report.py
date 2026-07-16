@@ -46,7 +46,7 @@ class DailyPrice:
     low: float
     close: float
     volume: float
-    amount: float
+    amount: float | None
     turnover_rate: float | None
 
 
@@ -125,6 +125,10 @@ class FundamentalSnapshot:
     pledge_ratio: float | None = None
     pledge_as_of: str | None = None
     pledge_source_id: str | None = None
+    deducted_net_income: float | None = None
+    non_recurring_profit_impact: float | None = None
+    non_recurring_profit_ratio: float | None = None
+    scope_limitations: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -179,6 +183,13 @@ class MoneyFlowSnapshot:
     small_net_inflow: float | None = None
     as_of: str | None = None
     northbound_net_inflow: float | None = None
+    # Independent fallback derived from exchange ticks.  This is deliberately
+    # separate from vendor-defined "main force" flow: an up-tick minus
+    # down-tick amount is observable, but it must never be relabelled as
+    # institutional or main-capital activity.
+    trade_direction_net_inflow: float | None = None
+    trade_direction_gross_amount: float | None = None
+    flow_method: str | None = None
 
 
 @dataclass(frozen=True)
@@ -306,6 +317,9 @@ class MarketContext:
     broken_limit_up_count: int | None = None
     board_ladder: dict[str, int] = field(default_factory=dict)
     sentiment_history: list["MarketSentimentObservation"] = field(default_factory=list)
+    median_stock_change_pct: float | None = None
+    amount_weighted_change_pct: float | None = None
+    top_amount_concentration_pct: float | None = None
     data_status: str = "verified"
     as_of: str | None = None
     unavailable_reasons: list[str] = field(default_factory=list)
@@ -349,6 +363,9 @@ class MarketSentimentObservation:
     one_price_limit_up_count: int | None = None
     broken_limit_up_count: int | None = None
     board_ladder: dict[str, int] = field(default_factory=dict)
+    median_stock_change_pct: float | None = None
+    amount_weighted_change_pct: float | None = None
+    top_amount_concentration_pct: float | None = None
 
 
 @dataclass(frozen=True)

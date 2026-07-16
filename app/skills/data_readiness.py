@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.schemas.report import DailyPrice, DataQualityReport, EvidenceSource, SkillInsight
 from app.config.runtime import load_runtime_settings
 from app.indicators.technical import required_history_bars
+from datetime import date
 
 
 _SAMPLE_TYPES = {"sample", "offline_sample"}
@@ -31,7 +32,7 @@ def assess_data_readiness(
     unavailable: list[str] = []
     sample: list[str] = []
     time_mismatch: list[str] = []
-    reports = list(quality_reports or [])
+    reports = _compact_quality_reports(list(quality_reports or []))
     blocking_quality_failures = [
         item for item in reports if item.status == "failed" and item.blocking
     ]
@@ -41,7 +42,7 @@ def assess_data_readiness(
 
     evidence.extend(
         f"quality:{item.provider}.{item.dataset}={item.status} ({item.valid_records}/{item.checked_records})"
-        for item in reports
+        for item in reports if not item.dataset.startswith("raw:")
     )
 
     for source_id in required_source_ids:
@@ -53,7 +54,7 @@ def assess_data_readiness(
             unavailable.append(source_id)
         elif source.source_type in _SAMPLE_TYPES:
             sample.append(source_id)
-        if source_id in time_sensitive_source_ids and source.as_of != analysis_date:
+        if source_id in time_sensitive_source_ids and not _source_time_is_acceptable(source_id, source.as_of, analysis_date):
             time_mismatch.append(source_id)
 
     if missing:
@@ -76,9 +77,13 @@ def assess_data_readiness(
             + "。"
         )
     if quality_warnings:
+        visible_limit = int(load_runtime_settings().get("providers", "high_availability", "quality_summary")["maximum_visible_warnings"])
+        hidden_warning_count = max(0, len(quality_warnings) - visible_limit)
+        quality_warnings = quality_warnings[:visible_limit]
         risks.append(
             "非阻断数据质量告警："
             + ", ".join(f"{item.provider}.{item.dataset}:{item.status}" for item in quality_warnings)
+            + (f"; {hidden_warning_count} additional warnings grouped" if hidden_warning_count else "")
             + "；相关维度不得生成强结论。"
         )
 
@@ -139,3 +144,45 @@ def assess_data_readiness(
             "mode": "data_readiness",
         },
     )
+
+
+def _source_time_is_acceptable(source_id: str, source_as_of: str, analysis_date: str) -> bool:
+    if source_as_of == analysis_date:
+        return True
+    config = load_runtime_settings().get("providers", "high_availability", "source_lag")
+    if not config["current_day_grace_enabled"] or analysis_date != date.today().isoformat():
+        return False
+    try:
+        lag = (date.fromisoformat(analysis_date) - date.fromisoformat(source_as_of[:10])).days
+    except ValueError:
+        return False
+    return 0 <= lag <= int(config["maximum_calendar_days"].get(source_id, 0))
+
+
+def _compact_quality_reports(reports: list[DataQualityReport]) -> list[DataQualityReport]:
+    """Collapse retries so the court sees dataset health, not request noise."""
+    by_key: dict[tuple[str, str, str], DataQualityReport] = {}
+    raw_failures: dict[str, DataQualityReport] = {}
+    config = load_runtime_settings().get("providers", "high_availability", "quality_summary")
+    for item in reports:
+        if item.dataset.startswith("raw:"):
+            if item.status == "passed" and config["hide_raw_snapshot_successes"]:
+                continue
+            if item.status == "failed" and config["group_raw_snapshot_failures"]:
+                raw_failures[item.provider] = item
+                continue
+        by_key[(item.provider, item.dataset, item.status)] = item
+    for provider, item in raw_failures.items():
+        by_key[(provider, "raw:provider_requests", "failed")] = DataQualityReport(
+            provider=provider,
+            dataset="raw:provider_requests",
+            status="failed",
+            checked_records=0,
+            valid_records=0,
+            completeness=0.0,
+            as_of=item.as_of,
+            snapshot_ids=item.snapshot_ids,
+            issues=item.issues,
+            blocking=False,
+        )
+    return list(by_key.values())

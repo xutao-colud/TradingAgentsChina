@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-15.20",
+  "rule_version": "2026-07-16.1",
   "runtime": {
     "network_timeout_seconds": 8,
     "network_retry": {"max_attempts": 2, "initial_backoff_seconds": 0.25, "max_backoff_seconds": 1.0},
@@ -95,6 +95,48 @@
       "clist_fallback_urls": ["https://push2delay.eastmoney.com/api/qt/clist/get"],
       "headers": {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1", "Accept": "application/json,text/plain,*/*", "Accept-Language": "zh-CN,zh;q=0.9", "Connection": "close", "Referer": "https://quote.eastmoney.com/"}
     },
+    "high_availability": {
+      "route_order": {
+        "daily_prices": ["tushare", "akshare", "tencent", "verified_cache"],
+        "fundamentals": ["tushare", "sina", "verified_cache"],
+        "money_flow": ["tushare", "verified_cache_fresh", "ths", "sina_tick", "eastmoney", "verified_cache_stale"],
+        "market_context": ["tushare", "verified_cache_fresh", "sina", "akshare", "verified_cache_stale"]
+      },
+      "circuit_breaker": {"failure_threshold": 2, "cooldown_seconds": 120},
+      "verified_cache": {"directory": "data/cache/verified", "directory_env": "TRADINGOS_VERIFIED_CACHE_DIR", "schema_version": "1.2", "fresh_seconds": {"daily_prices": 300, "fundamentals": 86400, "money_flow": 120, "market_context": 120}},
+      "source_lag": {"current_day_grace_enabled": true, "maximum_calendar_days": {"price-001": 4, "flow-001": 4, "market-001": 4}},
+      "quality_summary": {"maximum_visible_warnings": 12, "hide_raw_snapshot_successes": true, "group_raw_snapshot_failures": true}
+    },
+    "public_fallback": {
+      "tencent_kline_url": "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get",
+      "tencent_index_symbol": "sh000001",
+      "tencent_quote_change_pct_index": 32,
+      "sina_market_count_url": "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount",
+      "sina_market_list_url": "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData",
+      "sina_market_node": "hs_a",
+      "sina_market_page_size": 100,
+      "sina_market_max_workers": 8,
+      "sina_market_minimum_coverage": 0.85,
+      "limit_match_tolerance_pct": 0.5,
+      "fundamental_function": "stock_financial_abstract",
+      "fundamental_quality_fields": ["revenue", "asset_turnover", "deducted_net_income"],
+      "money_flow_function": "stock_fund_flow_individual",
+      "sina_tick_function": "stock_intraday_sina",
+      "sina_tick_minimum_time": "09:30:00",
+      "sina_tick_fields": {"time": "ticktime", "price": "price", "volume": "volume", "previous_price": "prev_price", "direction": "kind"},
+      "sina_tick_direction_codes": {"up": "U", "down": "D", "equal": "E"},
+      "money_flow_period": "即时",
+      "financial_metrics": {
+        "revenue": "营业总收入", "net_income": "归母净利润", "deducted_net_income": "扣非净利润", "operating_cash_flow": "经营现金流量净额",
+        "total_assets": "资产总计", "total_equity": "股东权益合计(净资产)", "goodwill": "商誉",
+        "asset_turnover": "总资产周转率", "equity_multiplier": "权益乘数(含少数股权的净资产)",
+        "roe": "净资产收益率(ROE)", "gross_margin": "毛利率", "debt_to_asset": "资产负债率"
+      },
+      "money_flow_fields": {"code": "股票代码", "name": "股票简称", "turnover_rate": "换手率", "inflow": "流入资金", "outflow": "流出资金", "net": "净额", "amount": "成交额"},
+      "amount_units": {"万": 10000, "亿": 100000000},
+      "headers": {"User-Agent": "Mozilla/5.0 TradingAgentsChina/0.1", "Accept": "application/json,text/plain,*/*", "Connection": "close"}
+      ,"curl_first": true
+    },
     "sina": {"quote_url": "https://hq.sinajs.cn/list=", "headers": {"User-Agent": "TradingAgentsChina/0.1", "Referer": "https://finance.sina.com.cn"}},
     "tushare": {
       "enabled": true,
@@ -178,7 +220,8 @@
       },
       "bulk_snapshot_cache": {
         "slow_bulk_queries_enabled": false,
-        "enabled_interfaces": ["holder_trade", "earnings_forecast"],
+        "enabled_interfaces": ["northbound", "holder_trade", "earnings_forecast"],
+        "request_time_cache_only": ["northbound", "holder_trade", "earnings_forecast"],
         "maximum_age_minutes": 1440
       },
       "earnings_forecast_fields": {
@@ -224,7 +267,8 @@
     },
     "datasets": {
       "daily_prices": {
-        "required_fields": ["trade_date", "open", "high", "low", "close", "volume", "amount"],
+        "required_fields": ["trade_date", "open", "high", "low", "close", "volume"],
+        "recommended_fields": ["amount", "turnover_rate"],
         "finite_fields": ["open", "high", "low", "close", "volume", "amount", "turnover_rate"],
         "non_negative_fields": ["open", "high", "low", "close", "volume", "amount", "turnover_rate"],
         "date_field": "trade_date",
@@ -427,6 +471,24 @@
     "liquidity": {"minimum_amount": 30000000, "minimum_turnover_rate": 0.2}
   },
   "domain_knowledge": {
+    "market_breadth_confirmation": {
+      "top_amount_count": 20,
+      "neutral_score": 50,
+      "neutral_band_pct": 0.15,
+      "breadth_bullish_pct": 55,
+      "breadth_bearish_pct": 45,
+      "minimum_limit_balance": 5,
+      "index_median_divergence_pct": 0.8,
+      "concentration_warning_pct": 30,
+      "insufficient_adjustment": 0,
+      "insufficient_confidence_cap": 0.45,
+      "stages": {
+        "一致确认": {"score_adjustment": 8, "confidence_cap": 0.9},
+        "局部分化": {"score_adjustment": -5, "confidence_cap": 0.65},
+        "权重背离": {"score_adjustment": -15, "confidence_cap": 0.5}
+      }
+    },
+    "financial_quality": {"non_recurring_warning_pct": 30, "amount_display_divisor": 100000000, "amount_display_unit": "亿元"},
     "theme": {
       "aliases": {"人工智能": ["AI", "AI算力"], "半导体国产替代": ["芯片", "国产替代"], "机器人": ["人形机器人", "工业机器人"], "新能源": ["储能", "电池"], "消费复苏": ["食品饮料", "白酒", "消费"]},
       "industry_defaults": {"白酒": ["消费复苏", "高股息"], "食品饮料": ["消费复苏", "高股息"], "消费": ["消费复苏", "高股息"], "半导体": ["半导体国产替代", "人工智能"], "显示面板": ["显示面板国产替代", "OLED", "消费电子", "人工智能"], "机器人": ["机器人", "高端制造"], "电池": ["新能源", "储能"]},
@@ -559,13 +621,13 @@
     "market_temperature": {"base_score": 42, "index_change_weight": 9, "breadth_center": 0.5, "breadth_weight": 70, "amount_cap": 18, "amount_divisor": 100000000000, "limit_up_cap": 16, "limit_up_divisor": 5, "limit_down_cap": 12, "limit_down_divisor": 2, "amount_display_divisor": 100000000},
     "money_making_effect": {"base_score": 40, "first_board_cap": 20, "first_board_weight": 0.35, "second_board_cap": 20, "second_board_weight": 0.35, "strong_return_cap": 18, "strong_return_weight": 4, "failed_breakout_cap": 18, "failed_breakout_weight": 0.45},
     "main_force_behavior": {"base_score": 50, "main_flow_cap": 18, "main_flow_divisor": 12000000, "super_flow_cap": 10, "super_flow_divisor": 15000000, "trend_impact": 8, "volume_bonus": 8, "volume_low": 1.05, "volume_high": 1.8, "divergence_penalty": 10, "overheat_return_pct": 12, "distribution_return_pct": 5, "display_amount_divisor": 100000000},
-    "market_strategy_gate": {"readiness_threshold": 70, "defensive_threshold": 45, "offensive_threshold": 55, "insufficient_score": 0, "defensive_score": 35, "offensive_score": 75, "balanced_score": 58, "defensive_stages": ["退潮", "冰点"], "offensive_stages": ["启动", "发酵"], "all_playbooks": ["hot_money_leader", "trend_core", "institutional_growth", "institutional_value_dividend"]},
+    "market_strategy_gate": {"readiness_threshold": 70, "defensive_threshold": 45, "offensive_threshold": 55, "insufficient_score": 0, "defensive_score": 35, "sentiment_unavailable_score": 35, "sentiment_unavailable_allowed_playbooks": ["institutional_value_dividend"], "sentiment_unavailable_excluded_playbooks": ["hot_money_leader", "trend_core", "institutional_growth"], "offensive_score": 75, "balanced_score": 58, "defensive_stages": ["退潮", "冰点"], "offensive_stages": ["启动", "发酵"], "all_playbooks": ["hot_money_leader", "trend_core", "institutional_growth", "institutional_value_dividend"]},
     "profile_alignment": {"readiness_threshold": 70, "base_score": 50, "technical_threshold": 70, "technical_bonus": 15, "technical_penalty": 10, "sentiment_risk_stages": ["高潮", "退潮", "冰点"], "sentiment_penalty": 25, "sentiment_bonus": 10, "risk_threshold": 60, "risk_penalty": 20, "fit_threshold": 70, "watch_threshold": 45},
     "stock_score_model": {"readiness_threshold": 70, "agent_weight": 0.62, "skill_weight": 0.38, "risk_threshold": 60, "risk_penalty": 8, "strong_threshold": 78, "positive_threshold": 65, "neutral_threshold": 50},
     "evidence_chain": {"base_score": 100, "missing_evidence_penalty": 14, "missing_source_penalty": 14, "unknown_source_cap": 18, "unknown_source_each": 6, "missing_time_cap": 12, "missing_time_each": 4, "missing_counterpoint_penalty": 10, "missing_risk_penalty": 10, "missing_invalidation_penalty": 12, "invalid_confidence_penalty": 10, "unused_source_cap": 8, "unused_source_each": 2, "unused_source_display_limit": 4, "complete_threshold": 85, "usable_threshold": 70, "needs_evidence_threshold": 55},
     "research_cases": {"bull_threshold": 60, "bull_limit": 5, "bear_threshold": 50, "bear_limit": 6},
     "risk_manager": {"weak_skill_threshold": 50, "weak_agent_threshold": 45, "readiness_threshold": 70, "default_risk_score": 60, "high_risk_threshold": 45, "medium_risk_threshold": 60, "medium_weak_agent_count": 2},
-    "portfolio_manager": {"finding_weight": 0.65, "composite_weight": 0.35, "risk_threshold": 60, "risk_score_cap": 50, "retreat_score_cap": 58, "sentiment_missing_cap": 49, "profile_mismatch_cap": 58, "playbook_mismatch_cap": 58, "defensive_committee_cap": 56, "evidence_usable_threshold": 70, "evidence_usable_cap": 58, "evidence_weak_threshold": 55, "evidence_weak_cap": 50, "readiness_threshold": 70, "readiness_cap": 49, "weak_skill_threshold": 50, "confidence_floor": 0.35, "weak_skill_confidence_penalty": 0.04, "invalid_condition_cap": 55, "sentiment_missing_confidence_cap": 0.5, "strong_threshold": 78, "positive_threshold": 65, "neutral_threshold": 50, "risk_threshold_score": 40},
+    "portfolio_manager": {"finding_weight": 0.65, "composite_weight": 0.35, "risk_threshold": 60, "risk_score_cap": 50, "retreat_score_cap": 58, "sentiment_missing_cap": 58, "sentiment_missing_is_hard_block": false, "profile_mismatch_cap": 58, "playbook_mismatch_cap": 58, "defensive_committee_cap": 56, "evidence_usable_threshold": 70, "evidence_usable_cap": 58, "evidence_weak_threshold": 55, "evidence_weak_cap": 50, "readiness_threshold": 70, "readiness_cap": 49, "weak_skill_threshold": 50, "confidence_floor": 0.35, "weak_skill_confidence_penalty": 0.04, "invalid_condition_cap": 55, "sentiment_missing_confidence_cap": 0.5, "strong_threshold": 78, "positive_threshold": 65, "neutral_threshold": 50, "risk_threshold_score": 40},
     "playbook_evaluator": {
       "readiness_threshold": 70, "base_score": 50, "market_exclusion_cap": 45, "fit_threshold": 72, "watch_threshold": 50,
       "hot_money_leader": {"sentiment_stages": ["启动", "发酵"], "sentiment_bonus": 18, "sentiment_penalty": 35, "money_threshold": 65, "money_bonus": 12, "capital_threshold": 70, "capital_bonus": 12, "technical_threshold": 70, "technical_bonus": 8, "theme_stages": ["启动", "扩散"], "theme_bonus": 8, "risk_threshold": 65, "risk_penalty": 25},
