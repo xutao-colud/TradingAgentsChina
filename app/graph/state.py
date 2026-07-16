@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.schemas.report import (
     AhPremiumSnapshot,
@@ -47,3 +48,4 @@ class ResearchState:
     invalid_conditions: list[str] = field(default_factory=list)
     data_readiness: SkillInsight | None = None
     trading_profile: TradingProfile | None = None
+    realtime_quote: dict[str, Any] | None = None

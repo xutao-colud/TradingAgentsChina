@@ -9,9 +9,14 @@ def analyze_announcements(
     items: list[Announcement],
     prices: list[DailyPrice] | None = None,
     analysis_date: str | None = None,
+    realtime_quote: dict[str, object] | None = None,
 ) -> AgentFinding:
-    insight = analyze_announcement_impact(items, prices, analysis_date)
-    source_ids = list(dict.fromkeys(item.source_id for item in items if item.source_id))
+    insight = analyze_announcement_impact(items, prices, analysis_date, realtime_quote)
+    source_ids = list(dict.fromkeys([
+        *[item.source_id for item in items if item.source_id],
+        *[source_id for item in items for source_id in item.supporting_source_ids],
+        *(["realtime-quote-001"] if insight.details.get("realtime_reaction") else []),
+    ]))
     return AgentFinding(
         agent="新闻公告 Agent",
         conclusion=insight.conclusion,

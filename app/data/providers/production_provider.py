@@ -74,6 +74,13 @@ class ProductionMarketDataProvider(MarketDataProvider):
     def get_industry_context(self, symbol: str, analysis_date: str) -> IndustryContext:
         return self.tushare.get_industry_context(symbol, analysis_date)
 
+    def get_industry_flow_ranking(
+        self,
+        reference_date: str,
+        calendar_lookback_days: int,
+    ) -> tuple[str, list[IndustryFlowObservation]]:
+        return self.tushare.get_industry_flow_ranking(reference_date, calendar_lookback_days)
+
     def get_money_flow(self, symbol: str, analysis_date: str) -> MoneyFlowSnapshot:
         flow = self.tushare.get_money_flow(symbol, analysis_date)
         northbound = self.get_market_signals(symbol, analysis_date).northbound_holding

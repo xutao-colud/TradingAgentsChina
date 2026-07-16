@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Callable
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
@@ -18,6 +18,7 @@ from app.market.realtime import RealtimeQuote
 
 FetchText = Callable[[str], str]
 QuoteFetcher = Callable[[list[str]], dict[str, RealtimeQuote]]
+SecondaryRadarFetcher = Callable[[int, datetime], "MorningRadarSnapshot | None"]
 
 
 @dataclass(frozen=True)
@@ -82,19 +83,21 @@ class MorningMoneyRadarClient:
         fetch_text: FetchText | None = None,
         now: Callable[[], datetime] | None = None,
         quote_fetcher: QuoteFetcher | None = None,
+        secondary_fetcher: SecondaryRadarFetcher | None = None,
     ) -> None:
         self._fetch_text = fetch_text or _fetch_text
         self._now = now or datetime.now
         self._quote_fetcher = quote_fetcher
+        self._secondary_fetcher = secondary_fetcher
 
     def fetch_snapshot(self, limit: int | None = None, fallback_symbols: list[str] | None = None) -> MorningRadarSnapshot:
         settings = load_runtime_settings().get("morning_radar")
         requested_limit = settings["default_limit"] if limit is None else int(limit)
         safe_limit = max(settings["minimum_limit"], min(settings["maximum_limit"], requested_limit))
         try:
-            inflow = self._fetch_sector_flows(sort_desc=True, limit=safe_limit)
-            outflow = self._fetch_sector_flows(sort_desc=False, limit=safe_limit)
-            movers = self._fetch_fast_movers(limit=safe_limit)
+            inflow, inflow_source = self._fetch_sector_flows(sort_desc=True, limit=safe_limit)
+            outflow, outflow_source = self._fetch_sector_flows(sort_desc=False, limit=safe_limit)
+            movers, mover_source = self._fetch_fast_movers(limit=safe_limit)
             if not inflow and not outflow and not movers:
                 raise ValueError("No radar rows returned by provider")
             now = self._now()
@@ -108,7 +111,7 @@ class MorningMoneyRadarClient:
                 risks.insert(0, "当前不在交易日连续竞价时段，雷达可能反映最近可用交易数据。")
             return MorningRadarSnapshot(
                 as_of=now.isoformat(timespec="seconds"),
-                source="eastmoney_push2",
+                source=_combined_source(inflow_source, outflow_source, mover_source),
                 data_status=status,
                 market_phase=phase,
                 top_inflow_sectors=inflow,
@@ -118,6 +121,12 @@ class MorningMoneyRadarClient:
                 risks=risks,
             )
         except (OSError, URLError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            secondary = self._secondary_fallback(safe_limit)
+            if secondary is not None:
+                return replace(
+                    secondary,
+                    error="东方财富盘中全市场列表暂不可用，已切换至经校验的盘后行业资金备选源。",
+                )
             fallback = self._tracked_universe_fallback(
                 fallback_symbols or [],
                 safe_limit,
@@ -125,6 +134,14 @@ class MorningMoneyRadarClient:
             if fallback is not None:
                 return fallback
             return unavailable_morning_radar(error=str(exc), as_of=self._now().isoformat(timespec="seconds"))
+
+    def _secondary_fallback(self, limit: int) -> MorningRadarSnapshot | None:
+        if self._secondary_fetcher is None:
+            return None
+        try:
+            return self._secondary_fetcher(limit, self._now())
+        except (OSError, URLError, ValueError, KeyError, TypeError):
+            return None
 
     def _tracked_universe_fallback(
         self,
@@ -185,48 +202,60 @@ class MorningMoneyRadarClient:
             error="东方财富全市场列表接口暂不可用，已启用跟踪池报价快照降级。",
         )
 
-    def _fetch_sector_flows(self, sort_desc: bool, limit: int) -> list[SectorFlow]:
-        payload = _load_json(
-            self._request_text(
-                _eastmoney_url(
-                    {
-                        "pn": 1,
-                        "pz": limit,
-                        "po": 1 if sort_desc else 0,
-                        "np": 1,
-                        "fltt": 2,
-                        "invt": 2,
-                        "fid": "f62",
-                        "fs": "m:90+t:2",
-                        "fields": "f12,f14,f3,f62,f66,f184",
-                    }
-                )
+    def _fetch_sector_flows(self, sort_desc: bool, limit: int) -> tuple[list[SectorFlow], str]:
+        raw, source = self._request_text(
+            _eastmoney_url(
+                {
+                    "pn": 1,
+                    "pz": limit,
+                    "po": 1 if sort_desc else 0,
+                    "np": 1,
+                    "fltt": 2,
+                    "invt": 2,
+                    "fid": "f62",
+                    "fs": "m:90+t:2",
+                    "fields": "f12,f14,f3,f62,f66,f184",
+                }
             )
         )
-        return [_sector_from_row(row) for row in _diff_rows(payload)]
-
-    def _fetch_fast_movers(self, limit: int) -> list[FastMover]:
         payload = _load_json(
-            self._request_text(
-                _eastmoney_url(
-                    {
-                        "pn": 1,
-                        "pz": limit,
-                        "po": 1,
-                        "np": 1,
-                        "fltt": 2,
-                        "invt": 2,
-                        "fid": "f22",
-                        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-                        "fields": "f12,f14,f2,f3,f6,f22,f62,f184",
-                    }
-                )
+            raw
+        )
+        return [_sector_from_row(row) for row in _diff_rows(payload)], source
+
+    def _fetch_fast_movers(self, limit: int) -> tuple[list[FastMover], str]:
+        raw, source = self._request_text(
+            _eastmoney_url(
+                {
+                    "pn": 1,
+                    "pz": limit,
+                    "po": 1,
+                    "np": 1,
+                    "fltt": 2,
+                    "invt": 2,
+                    "fid": "f22",
+                    "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+                    "fields": "f12,f14,f2,f3,f6,f22,f62,f184",
+                }
             )
         )
-        return [_mover_from_row(row) for row in _diff_rows(payload)]
+        payload = _load_json(
+            raw
+        )
+        return [_mover_from_row(row) for row in _diff_rows(payload)], source
 
-    def _request_text(self, url: str) -> str:
-        return retry_call(lambda: self._fetch_text(url), operation_name="Eastmoney morning radar")
+    def _request_text(self, url: str) -> tuple[str, str]:
+        settings = load_runtime_settings().get("providers", "eastmoney")
+        query = urlsplit(url).query
+        errors: list[Exception] = []
+        for base_url in [settings["clist_url"], *settings["clist_fallback_urls"]]:
+            candidate = base_url + (f"?{query}" if query else "")
+            try:
+                raw = retry_call(lambda: self._fetch_text(candidate), operation_name="Eastmoney morning radar")
+                return raw, _eastmoney_source(candidate)
+            except (OSError, URLError) as exc:
+                errors.append(exc)
+        raise OSError(f"All configured Eastmoney radar endpoints failed: {errors[-1] if errors else 'no endpoint'}")
 
 
 def unavailable_morning_radar(error: str | None = None, as_of: str | None = None) -> MorningRadarSnapshot:
@@ -283,7 +312,8 @@ def _eastmoney_url(params: dict[str, object]) -> str:
 
 def _fetch_text(url: str) -> str:
     eastmoney = load_runtime_settings().get("providers", "eastmoney")
-    if not url.startswith(eastmoney["clist_url"]):
+    allowed = [eastmoney["clist_url"], *eastmoney["clist_fallback_urls"]]
+    if not any(url.startswith(item) for item in allowed):
         raise ValueError("Blocked morning radar URL")
     request = Request(url, headers=eastmoney["headers"])
     try:
@@ -315,6 +345,15 @@ def _fetch_text_with_curl(url: str) -> str:
     if completed.returncode != 0 or not completed.stdout.strip():
         raise OSError((completed.stderr or "curl returned no data").strip())
     return completed.stdout
+
+
+def _eastmoney_source(url: str) -> str:
+    host = (urlsplit(url).hostname or "unknown").split(".", 1)[0]
+    return f"eastmoney_{host}"
+
+
+def _combined_source(*sources: str) -> str:
+    return "+".join(dict.fromkeys(sources))
 
 
 def _load_json(raw: str) -> dict[str, object]:

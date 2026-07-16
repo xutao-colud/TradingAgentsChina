@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from app.config.runtime import load_runtime_settings
 from app.schemas.report import Announcement, DailyPrice, SkillInsight
 from app.skills.common import clamp_score
@@ -9,6 +11,7 @@ def analyze_announcement_impact(
     announcements: list[Announcement],
     prices: list[DailyPrice] | None = None,
     analysis_date: str | None = None,
+    realtime_quote: dict[str, object] | None = None,
 ) -> SkillInsight:
     config = load_runtime_settings().get("domain_knowledge", "announcement_timeliness")
     content_config = load_runtime_settings().get("scoring", "announcement")
@@ -40,6 +43,16 @@ def analyze_announcement_impact(
             f"收盘相对开盘 {reaction['close_from_open_pct']:+.2f}%。"
         )
 
+    realtime_reaction = _realtime_reaction(ordered, realtime_quote, effective_date, config)
+    if realtime_reaction:
+        if realtime_reaction["direction"] == "negative":
+            score -= float(config["realtime_negative_move_penalty"])
+        elif realtime_reaction["direction"] == "positive":
+            score += float(config["realtime_positive_move_impact"])
+        evidence.append(str(realtime_reaction["description"]))
+        if realtime_reaction["material"]:
+            risks.append("实时行情出现显著异动；它能反驳“市场尚无反应”，但不能单独证明由某一公告造成。")
+
     forecast_checks = _forecast_checks(ordered, config)
     for check in forecast_checks:
         if check["actual_vs_forecast"] == "above":
@@ -47,6 +60,15 @@ def analyze_announcement_impact(
         elif check["actual_vs_forecast"] == "below":
             score -= float(config["forecast_below_penalty"])
         evidence.append(f"业绩核验｜{check['report_period']}：{check['description']}。")
+    forecast_items = [item for item in ordered if item.event_type == "earnings_forecast"]
+    structured_forecasts = [
+        item for item in forecast_items
+        if item.report_period
+        and item.forecast_net_profit_min_yuan is not None
+        and item.forecast_net_profit_max_yuan is not None
+    ]
+    if forecast_items and not structured_forecasts:
+        risks.append("已确认业绩预告公告存在，但预告区间尚未结构化；不得降级表述为“没有业绩预告”。")
 
     inquiry_checks = _inquiry_checks(ordered, config)
     unresolved = [item for item in inquiry_checks if item["status"] == "unanswered"]
@@ -56,17 +78,20 @@ def analyze_announcement_impact(
         risks.append(f"存在 {len(unresolved)} 条在当前公告窗口内未匹配到回复的问询/关注函。")
 
     for item in ordered:
-        evidence.append(f"{item.published_at}｜{item.priority}｜{item.sentiment}｜{item.title}")
-    if ordered and not reactions:
+        evidence.append(f"{item.published_timestamp or item.published_at}｜{item.priority}｜{item.sentiment}｜{item.title}")
+    if ordered and not reactions and not realtime_reaction:
         risks.append("缺少公告后交易日或价格历史，无法判断高开低走、持续上涨等市场反应。")
     if not ordered:
         risks.append("未获得可追溯公告，不能把公告缺失解释为公司没有事件风险。")
     risks.append("公告后价格变化仅为时间关联，不证明公告造成该走势。")
-    risks.append("公告发布时间缺少时分秒时，统一从下一交易日开始观察，可能晚于真实首次反应。")
+    if any(item.published_timestamp is None for item in ordered):
+        risks.append("部分公告缺少时分秒，相关公告统一从下一交易日开始观察，可能晚于真实首次反应。")
 
     final_score = clamp_score(score)
     if unresolved or any(item["actual_vs_forecast"] == "below" for item in forecast_checks):
         stage = "事件风险待闭环"
+    elif realtime_reaction and realtime_reaction["material"]:
+        stage = "公告后显著异动待归因"
     elif any(item["pattern"] == "high_open_fade" for item in reactions):
         stage = "利好兑现分歧"
     elif any(item["pattern"] == "sustained_rise" for item in reactions):
@@ -87,11 +112,80 @@ def analyze_announcement_impact(
         details={
             "analysis_date": effective_date,
             "market_reactions": reactions,
+            "realtime_reaction": realtime_reaction,
             "forecast_checks": forecast_checks,
+            "forecast_coverage": {
+                "announcements_found": len(forecast_items),
+                "structured_forecasts": len(structured_forecasts),
+                "status": "structured" if structured_forecasts else "title_only" if forecast_items else "not_found",
+            },
             "inquiry_checks": inquiry_checks,
-            "source_ids": _unique([item.source_id for item in ordered]),
+            "source_ids": _unique([
+                *[item.source_id for item in ordered],
+                *[source_id for item in ordered for source_id in item.supporting_source_ids],
+                *(["realtime-quote-001"] if realtime_reaction else []),
+            ]),
         },
     )
+
+
+def _realtime_reaction(
+    announcements: list[Announcement],
+    quote: dict[str, object] | None,
+    effective_date: str | None,
+    config: dict[str, object],
+) -> dict[str, object] | None:
+    if not quote or quote.get("data_status") == "unavailable":
+        return None
+    trade_date = str(quote.get("trade_date") or "")[:10]
+    try:
+        change_pct = float(quote["change_pct"])
+        price = float(quote["price"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not trade_date or (effective_date and trade_date > effective_date):
+        return None
+    quote_date = date.fromisoformat(trade_date)
+    relation_start = (quote_date - timedelta(days=int(config["realtime_relation_lookback_days"]))).isoformat()
+    eligible = [
+        item for item in announcements
+        if relation_start <= item.published_at <= trade_date and item.event_type != "general"
+    ]
+    if not eligible:
+        eligible = [item for item in announcements if relation_start <= item.published_at <= trade_date]
+    if not eligible:
+        return None
+    threshold = float(config["realtime_material_move_pct"])
+    material = abs(change_pct) >= threshold
+    direction = "negative" if change_pct <= -threshold else "positive" if change_pct >= threshold else "mixed"
+    amount = _optional_float(quote.get("amount"))
+    volume = _optional_float(quote.get("volume"))
+    amount_text = (
+        f"，成交额 {amount / float(config['realtime_amount_display_divisor']):.2f} 亿元"
+        if amount is not None else ""
+    )
+    volume_text = (
+        f"，成交量 {volume / float(config['realtime_volume_display_divisor']):.2f} 万手"
+        if volume is not None else ""
+    )
+    observed_at = str(quote.get("trade_time") or trade_date)
+    source = str(quote.get("source") or "unknown")
+    return {
+        "trade_date": trade_date,
+        "observed_at": observed_at,
+        "price": price,
+        "change_pct": change_pct,
+        "volume": volume,
+        "amount": amount,
+        "source": source,
+        "material": material,
+        "direction": direction,
+        "temporally_eligible_announcement_source_ids": [item.source_id for item in eligible],
+        "description": (
+            f"实时异动｜{trade_date} 收盘/最新价 {price:.2f} 元，涨跌幅 {change_pct:+.2f}%"
+            f"{volume_text}{amount_text}；来源 {source}，采集时间 {observed_at}。"
+        ),
+    }
 
 
 def _market_reactions(
@@ -187,7 +281,11 @@ def _forecast_checks(announcements: list[Announcement], config: dict[str, object
             "forecast_min_yuan": latest.forecast_net_profit_min_yuan,
             "forecast_max_yuan": latest.forecast_net_profit_max_yuan,
             "actual_net_profit_yuan": actual,
-            "description": f"预告修正={revision}，快报/实际值相对最新预告区间={actual_status}",
+            "description": (
+                f"归母净利润预告区间 {float(latest.forecast_net_profit_min_yuan) / float(config['forecast_amount_display_divisor']):.2f}"
+                f"-{float(latest.forecast_net_profit_max_yuan) / float(config['forecast_amount_display_divisor']):.2f} 亿元；"
+                f"预告修正={revision}，快报/实际值相对最新预告区间={actual_status}"
+            ),
         })
     return results
 
@@ -227,3 +325,10 @@ def _title_similarity(left: str, right: str, config: dict[str, object]) -> float
 
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None

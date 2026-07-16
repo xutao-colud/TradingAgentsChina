@@ -70,6 +70,8 @@ def retry_call(
 def is_retryable_exception(exc: Exception) -> bool:
     if isinstance(exc, HTTPError):
         return exc.code in {408, 425, 429, 500, 502, 503, 504}
+    if is_outbound_access_denied(exc):
+        return False
     message = str(exc).lower()
     permanent_markers = (
         "permission denied", "access is denied", "forbidden", "unauthorized",
@@ -85,3 +87,16 @@ def is_retryable_exception(exc: Exception) -> bool:
         "http 500", "http 502", "http 503", "http 504",
     )
     return any(marker in message for marker in transient_markers)
+
+
+def is_outbound_access_denied(exc: Exception) -> bool:
+    """Return true for local or network-policy socket denials, never retry them."""
+    message = str(exc).lower()
+    markers = (
+        "winerror 10013",
+        "forbidden by its access permissions",
+        "access a socket in a way forbidden",
+        "以一种访问权限不允许的方式",
+        "访问套接字的尝试",
+    )
+    return any(marker in message for marker in markers)

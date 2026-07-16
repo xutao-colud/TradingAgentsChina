@@ -46,7 +46,11 @@ def render_markdown(report: AnalysisReport) -> str:
             lines.extend(f"  - {item}" for item in insight.risks)
         lines.append("")
     if report.model_interpretation:
-        lines.extend(["## DeepSeek 解释", "", report.model_interpretation, ""])
+        execution = report.model_execution or {}
+        provider_name = execution.get("provider_name", "模型")
+        model_name = execution.get("model")
+        heading = f"## {provider_name}{f' · {model_name}' if model_name else ''} 解释"
+        lines.extend([heading, "", report.model_interpretation, ""])
     lines.extend([
         "## 多头观点",
         "",

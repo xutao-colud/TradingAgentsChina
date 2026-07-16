@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-14.18",
+  "rule_version": "2026-07-15.20",
   "runtime": {
     "network_timeout_seconds": 8,
     "network_retry": {"max_attempts": 2, "initial_backoff_seconds": 0.25, "max_backoff_seconds": 1.0},
@@ -12,7 +12,12 @@
     "default_limit": 6,
     "minimum_limit": 3,
     "maximum_limit": 12,
-    "fallback_maximum_symbols": 60
+    "fallback_maximum_symbols": 60,
+    "tushare_eod_fallback": {
+      "enabled": true,
+      "calendar_lookback_days": 7,
+      "minimum_sector_rows": 3
+    }
   },
   "opportunity_pipeline": {
     "source_priority": {
@@ -85,6 +90,9 @@
       "stock_url": "https://push2.eastmoney.com/api/qt/stock/get",
       "flow_url": "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get",
       "clist_url": "https://push2.eastmoney.com/api/qt/clist/get",
+      "stock_fallback_urls": ["https://push2delay.eastmoney.com/api/qt/stock/get"],
+      "flow_fallback_urls": ["https://push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get"],
+      "clist_fallback_urls": ["https://push2delay.eastmoney.com/api/qt/clist/get"],
       "headers": {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) TradingAgentsChina/0.1", "Accept": "application/json,text/plain,*/*", "Accept-Language": "zh-CN,zh;q=0.9", "Connection": "close", "Referer": "https://quote.eastmoney.com/"}
     },
     "sina": {"quote_url": "https://hq.sinajs.cn/list=", "headers": {"User-Agent": "TradingAgentsChina/0.1", "Referer": "https://finance.sina.com.cn"}},
@@ -152,7 +160,8 @@
         "order_book": "stock_bid_ask_em",
         "northbound": "stock_hsgt_hold_stock_em",
         "holder_trade": "stock_ggcg_em",
-        "announcement": "stock_zh_a_disclosure_report_cninfo"
+        "announcement": "stock_zh_a_disclosure_report_cninfo",
+        "earnings_forecast": "stock_yjyg_em"
       },
       "market_context": {
         "index_series": "上证系列指数",
@@ -169,9 +178,24 @@
       },
       "bulk_snapshot_cache": {
         "slow_bulk_queries_enabled": false,
-        "enabled_interfaces": ["holder_trade"],
+        "enabled_interfaces": ["holder_trade", "earnings_forecast"],
         "maximum_age_minutes": 1440
-      }
+      },
+      "earnings_forecast_fields": {
+        "code": "股票代码",
+        "name": "股票简称",
+        "metric": "预测指标",
+        "change_description": "业绩变动",
+        "forecast_value": "预测数值",
+        "change_pct": "业绩变动幅度",
+        "reason": "业绩变动原因",
+        "forecast_type": "预告类型",
+        "prior_value": "上年同期值",
+        "published_at": "公告日期"
+      },
+      "earnings_forecast_metric_priority": ["归属于上市公司股东的净利润", "净利润"],
+      "earnings_forecast_amount_units": {"亿元": 100000000, "万元": 10000, "元": 1},
+      "earnings_forecast_summary_max_chars": 1200
     },
     "event_sentiment": {"positive_forecast_types": ["预增", "略增", "扭亏", "续盈"], "negative_forecast_types": ["预减", "略减", "首亏", "续亏"], "positive_holder_trade_types": ["IN", "增持"], "negative_holder_trade_types": ["DE", "减持"]},
     "models": [
@@ -336,6 +360,17 @@
         "empty_status": "warning",
         "blocking": false
       },
+      "earnings_forecast_details": {
+        "required_fields": ["code", "report_period", "published_at", "metric", "forecast_min_yuan", "forecast_max_yuan", "source_id"],
+        "finite_fields": ["forecast_min_yuan", "forecast_max_yuan", "change_pct", "prior_value"],
+        "non_negative_fields": [],
+        "date_field": "published_at",
+        "unique_fields": ["code", "report_period", "published_at", "metric"],
+        "require_analysis_date_match": false,
+        "allow_future_date": false,
+        "empty_status": "warning",
+        "blocking": false
+      },
       "holder_trades": {
         "required_fields": ["event_type", "title", "published_at", "impact", "source_id"],
         "finite_fields": [],
@@ -439,9 +474,16 @@
       "fade_from_open_pct": 2.0,
       "sustained_rise_min_pct": 2.0,
       "forecast_revision_tolerance_pct": 5.0,
+      "forecast_amount_display_divisor": 100000000,
       "inquiry_keywords": ["问询函", "关注函", "监管工作函"],
       "reply_keywords": ["回复", "答复"],
       "event_type_map": {"业绩预告": "earnings_forecast", "业绩快报": "earnings_express", "实际业绩": "earnings_actual", "限售解禁": "share_unlock", "股东增减持": "holder_trade"},
+      "report_period_title_patterns": [
+        {"pattern": "(?P<year>20\\d{2})年(?:第一季度|一季度)", "month_day": "03-31"},
+        {"pattern": "(?P<year>20\\d{2})年(?:半年度|上半年度|1-6月)", "month_day": "06-30"},
+        {"pattern": "(?P<year>20\\d{2})年(?:前三季度|1-9月)", "month_day": "09-30"},
+        {"pattern": "(?P<year>20\\d{2})年(?:年度|年报)", "month_day": "12-31"}
+      ],
       "negative_title_keywords": ["风险提示", "立案", "处罚", "下修", "预减", "首亏", "续亏", "问询函"],
       "positive_title_keywords": ["上修", "预增", "扭亏", "回购", "增持"],
       "thread_stop_phrases": ["关于", "公司", "公告", "交易所", "问询函", "关注函", "监管工作函", "回复", "答复"],
@@ -452,7 +494,13 @@
       "fade_reaction_penalty": 8,
       "forecast_above_impact": 8,
       "forecast_below_penalty": 12,
-      "unanswered_inquiry_penalty": 10
+      "unanswered_inquiry_penalty": 10,
+      "realtime_material_move_pct": 7.0,
+      "realtime_relation_lookback_days": 10,
+      "realtime_negative_move_penalty": 10,
+      "realtime_positive_move_impact": 6,
+      "realtime_amount_display_divisor": 100000000,
+      "realtime_volume_display_divisor": 10000
     },
     "industry_prosperity": {
       "neutral_score": 50,
@@ -539,7 +587,7 @@
         "defensive": {"base": 48, "risk_threshold": 60, "low_risk_score_bonus": 24, "residual_risk_weight": 12, "residual_risk_divisor": 3, "cold_sentiment_bonus": 18, "climax_bonus": 10, "opportunity_cost_penalty": 6, "invalid_condition_bonus": 18, "market_threshold": 70, "market_weight": 10}
       }
     },
-    "data_readiness": {"minimum_daily_bars": 20, "verified_score": 90, "mixed_score": 55, "quality_warning_score": 70, "sample_score": 40, "insufficient_score": 20, "required_source_ids": ["price-001", "fund-001", "flow-001", "market-001"], "time_sensitive_source_ids": ["price-001", "flow-001", "market-001"]},
+    "data_readiness": {"minimum_daily_bars": 20, "verified_score": 90, "mixed_score": 55, "quality_warning_score": 70, "sample_score": 40, "insufficient_score": 20, "required_source_ids": ["price-001", "fund-001", "flow-001", "market-001"], "time_sensitive_source_ids": ["price-001", "flow-001", "market-001"], "domain_quality_caps": {"新闻公告 Agent": {"datasets": ["announcements", "earnings_forecast_details"], "warning_cap": 0.7, "failed_cap": 0.2}}},
     "committee_signals": {
       "required_quality_status": "passed",
       "dragon_tiger": {"aggressive_direction_impact": 6, "institution_direction_impact": 3, "identified_hot_money_seat_impact": 2, "identified_hot_money_max_impact": 4},

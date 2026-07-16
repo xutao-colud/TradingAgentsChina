@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
+from urllib.error import URLError
 
 from app.graph.workflow import build_sample_workflow
 from app.llm.config import DeepSeekConfig
-from app.llm.deepseek_client import DeepSeekClient
+from app.llm.deepseek_client import DeepSeekClient, _post_json
 
 
 class DeepSeekClientTest(unittest.TestCase):
@@ -45,3 +47,9 @@ class DeepSeekClientTest(unittest.TestCase):
         report = build_sample_workflow().run("600519", "2026-07-10")
         with self.assertRaisesRegex(RuntimeError, "DEEPSEEK_API_KEY"):
             DeepSeekClient(DeepSeekConfig(api_key=None)).explain(report, {})
+
+    def test_reports_socket_policy_denial_without_claiming_an_api_failure(self) -> None:
+        denied = URLError(OSError("[WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions"))
+        with patch("app.llm.deepseek_client.urlopen", side_effect=denied):
+            with self.assertRaisesRegex(RuntimeError, "Outbound network access was denied"):
+                _post_json("https://api.deepseek.com/chat/completions", {}, {})

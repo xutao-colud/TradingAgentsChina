@@ -169,7 +169,7 @@ Watchlist and portfolio data are included in `trading-agents-memory.json` export
 
 ### Morning money radar
 
-The dashboard includes a short-line `早盘资金雷达` panel. It ranks sector main-force inflow, sector outflow, and fast-moving stocks through `MorningMoneyRadarClient`. When the public provider is unavailable it returns `unavailable` and no sample movers; offline samples are available only through explicit test/demo helpers. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
+The dashboard includes a short-line `早盘资金雷达` panel. It uses a strict source chain: Eastmoney real-time market-wide radar first; then authenticated Tushare `moneyflow_ind_ths` as a **post-market, latest-available** industry-flow fallback; then Sina quotes scoped only to watchlist/positions/opportunity-pool symbols. The latter two must never be described as market-wide intraday money flow. If no source is verifiable it returns `unavailable` and no sample movers. Every response is labelled with `source`, `data_status`, and `as_of`; read [the radar guide](docs/v3/morning-money-radar.md) before using it in a short-line playbook.
 
 ## Switchable A-share playbooks
 
@@ -231,6 +231,6 @@ DeepSeek receives the deterministic report and a compact local-memory summary on
 
 ## Multi-model live explanation
 
-The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis.
+The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, click **配置当前模型**, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis. Each analysis is bound to that saved provider/model pair; an unsaved selection is rejected instead of falling back to the previous model.
 
 For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle, and [the flexibility audit](docs/v3/flexibility-audit.md) for hard-coded areas that should become versioned configuration.

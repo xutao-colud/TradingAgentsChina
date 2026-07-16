@@ -271,6 +271,14 @@ class TushareMarketDataProviderTest(unittest.TestCase):
         self.assertTrue(sources["industry-flow-001"].snapshot_ids)
         self.assertTrue(sources["industry-valuation-001"].snapshot_ids)
 
+    def test_industry_flow_ranking_returns_latest_validated_daily_snapshot(self) -> None:
+        as_of, flows = self.provider.get_industry_flow_ranking("2026-07-15", calendar_lookback_days=7)
+
+        self.assertEqual(as_of, "2026-07-10")
+        self.assertEqual(len(flows), 4)
+        self.assertEqual(flows[0].industry_code, "881100.TI")
+        self.assertEqual(flows[0].net_amount, 800_000_000)
+
     def test_provider_exposes_capabilities_and_replayable_raw_snapshots(self) -> None:
         self.provider.get_market_signals("600519", "2026-07-10")
 
