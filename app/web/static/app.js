@@ -1,4 +1,9 @@
-const state = { lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null, analysisProgressTimer: null, analysisStartedAt: null };
+const state = {
+  lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null,
+  analysisProgressTimer: null, analysisStartedAt: null,
+  tickerTimer: null, tickerInFlight: false, tickerTrackedCount: 0,
+  tickerConfig: { refresh_interval_ms: null, error_backoff_ms: null, animation_duration_ms: null },
+};
 
 const $ = (id) => document.getElementById(id);
 
@@ -152,6 +157,7 @@ function shares(value) { return value == null ? "—" : new Intl.NumberFormat("z
 
 function watchRow(item, openDetail = false) {
   const row = document.createElement("div"); row.className = "watch-row";
+  row.dataset.symbol = item.symbol;
   const main = document.createElement("div"); const symbol = document.createElement("strong"); const note = document.createElement("span");
   const snapshot = item.snapshot;
   text(symbol, `${item.symbol}${snapshot?.name ? ` · ${snapshot.name}` : ""}`);
@@ -162,6 +168,8 @@ function watchRow(item, openDetail = false) {
   if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quote.data_status} · ${quote.trade_date || ""}`); }
   else { text(price, "行情不可用"); price.className = "flat"; text(meta, quote?.error || "请刷新后重试"); }
   const advice = document.createElement("p"); text(advice, item.advice || "点击刷新实时行情以获取研究提示。");
+  initializeRollingPrice(price, quote);
+  price.classList.add("watch-live-price"); meta.dataset.role = "quote-meta";
   row.append(main, price, meta);
   if (snapshot) row.append(watchDetail(snapshot, openDetail));
   row.append(advice); return row;
@@ -221,6 +229,7 @@ function renderPositions(positions) {
 
 function positionRow(position) {
   const row = document.createElement("div"); row.className = "position-row";
+  row.dataset.symbol = position.symbol;
   const head = document.createElement("div"); const symbol = document.createElement("strong"); const meta = document.createElement("span");
   const quote = position.quote || {};
   text(symbol, `${position.symbol}${quote.name ? ` · ${quote.name}` : ""}`);
@@ -249,6 +258,8 @@ function positionRow(position) {
   const remove = document.createElement("button"); remove.type = "button"; remove.className = "danger-button"; text(remove, "删除");
   remove.addEventListener("click", () => deletePosition(position.symbol));
   actions.append(edit, remove);
+  const positionPrice = metrics.querySelector("em");
+  if (positionPrice) initializeRollingPrice(positionPrice, quote);
   row.append(head, pnl, metrics, advice, actions);
   return row;
 }
@@ -267,6 +278,105 @@ async function refreshMarket() {
   try { const { data } = await api("/api/market/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); renderWatchlist(data.watchlist); renderPortfolio(data.portfolio); text($("marketMessage"), "已刷新。请注意行情源状态与时间戳；建议仅作研究依据。"); }
   catch (error) { text($("marketMessage"), `刷新失败：${error.message}`); } finally { button.disabled = false; }
 }
+
+function initializeRollingPrice(element, quote) {
+  element.classList.add("live-price");
+  const initialText = element.textContent;
+  const value = document.createElement("span"); value.className = "rolling-number__value is-current";
+  text(value, initialText); element.replaceChildren(value);
+  if (quote?.price != null && Number.isFinite(Number(quote.price))) element.dataset.price = String(Number(quote.price));
+  element.setAttribute("aria-live", "polite");
+}
+
+function animateRollingPrice(element, quote) {
+  if (!element || quote?.price == null || !Number.isFinite(Number(quote.price))) return;
+  const nextPrice = Number(quote.price); const previousPrice = Number(element.dataset.price);
+  const direction = Number.isFinite(previousPrice) && nextPrice !== previousPrice ? (nextPrice > previousPrice ? "up" : "down") : "flat";
+  const tone = direction === "flat" ? (Number(quote.change_pct) > 0 ? "up" : Number(quote.change_pct) < 0 ? "down" : "flat") : direction;
+  element.classList.remove("up", "down", "flat", "is-rolling"); element.classList.add(tone);
+  element.dataset.price = String(nextPrice); element.setAttribute("aria-label", `${nextPrice.toFixed(2)}，${direction === "up" ? "较上一笔上涨" : direction === "down" ? "较上一笔下跌" : "较上一笔不变"}`);
+  if (!Number.isFinite(previousPrice) || direction === "flat" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const current = document.createElement("span"); current.className = "rolling-number__value is-current"; text(current, nextPrice.toFixed(2)); element.replaceChildren(current); return;
+  }
+  const outgoing = document.createElement("span"); outgoing.className = "rolling-number__value is-current"; text(outgoing, previousPrice.toFixed(2));
+  const incoming = document.createElement("span"); incoming.className = "rolling-number__value is-incoming"; text(incoming, nextPrice.toFixed(2));
+  element.dataset.roll = direction; element.replaceChildren(outgoing, incoming);
+  requestAnimationFrame(() => element.classList.add("is-rolling"));
+  window.setTimeout(() => {
+    const current = document.createElement("span"); current.className = "rolling-number__value is-current"; text(current, nextPrice.toFixed(2));
+    element.replaceChildren(current); element.classList.remove("is-rolling"); delete element.dataset.roll;
+  }, Number(state.tickerConfig.animation_duration_ms));
+}
+
+function configureTicker(config) {
+  if (!config) return;
+  state.tickerConfig = { ...state.tickerConfig, ...config };
+  if (Number.isFinite(Number(config.animation_duration_ms))) document.documentElement.style.setProperty("--ticker-roll-duration", `${Number(config.animation_duration_ms)}ms`);
+}
+
+function scheduleTicker(delay = null) {
+  if (state.tickerTimer) window.clearTimeout(state.tickerTimer);
+  state.tickerTimer = null;
+  if (document.hidden || state.tickerTrackedCount < 1 || !Number.isFinite(Number(state.tickerConfig.refresh_interval_ms))) return;
+  const wait = delay == null ? Number(state.tickerConfig.refresh_interval_ms) : Math.max(0, Number(delay));
+  state.tickerTimer = window.setTimeout(refreshTicker, wait);
+}
+
+async function refreshTicker() {
+  if (state.tickerInFlight || document.hidden) { scheduleTicker(); return; }
+  state.tickerInFlight = true; setTickerStatus("正在同步轻量报价", "loading");
+  try {
+    const { data } = await api("/api/market/ticker", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    state.tickerTrackedCount = Number(data.tracked_count || 0);
+    if (state.tickerTrackedCount < 1) { setTickerStatus("加入自选或持仓后自动报价", "paused"); return; }
+    updateTrackedQuotes(data.quotes || {}); updatePortfolioTicker(data.portfolio);
+    setTickerStatus(data.source === "unavailable" ? "报价源暂不可用，自动重试" : `${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒自动报价 · ${data.source}`, data.source === "unavailable" ? "error" : "live");
+    scheduleTicker(data.source === "unavailable" ? state.tickerConfig.error_backoff_ms : data.refresh_interval_ms);
+  } catch (error) {
+    setTickerStatus(`自动报价失败：${error.message}`, "error"); scheduleTicker(state.tickerConfig.error_backoff_ms);
+  } finally { state.tickerInFlight = false; }
+}
+
+function updateTrackedQuotes(quotes) {
+  Object.entries(quotes).forEach(([symbol, quote]) => {
+    const row = Array.from(document.querySelectorAll(".watch-row[data-symbol]")).find((item) => item.dataset.symbol === symbol);
+    if (!row) return;
+    animateRollingPrice(row.querySelector(".watch-live-price"), quote);
+    const name = row.querySelector("div > strong"); if (name && quote.name) text(name, `${symbol} · ${quote.name}`);
+    const meta = row.querySelector('[data-role="quote-meta"]');
+    if (meta) text(meta, `${percentage(quote.change_pct)} · ${quote.data_status || "未知"} · ${quote.trade_date || ""} ${quote.trade_time || ""}`);
+  });
+}
+
+function updatePortfolioTicker(portfolio) {
+  if (!portfolio) return;
+  const fullyPriced = Number(portfolio.position_count || 0) === 0 || Number(portfolio.priced_positions || 0) === Number(portfolio.position_count || 0);
+  if (fullyPriced) {
+    const accountValues = [portfolio.cash_balance, portfolio.total_assets, portfolio.unrealized_pnl, portfolio.daily_pnl];
+    document.querySelectorAll("#accountStats > div strong").forEach((element, index) => text(element, money(accountValues[index])));
+  }
+  (portfolio.positions || []).forEach((position) => {
+    if (position.quote?.price == null || !Number.isFinite(Number(position.quote.price))) return;
+    const row = Array.from(document.querySelectorAll(".position-row[data-symbol]")).find((item) => item.dataset.symbol === position.symbol);
+    if (!row) return;
+    animateRollingPrice(row.querySelector(".position-metrics em"), position.quote || {});
+    const pnl = row.children[1]; if (pnl) { pnl.className = position.unrealized_pnl > 0 ? "up" : position.unrealized_pnl < 0 ? "down" : "flat"; text(pnl, `${money(position.unrealized_pnl)} / ${percentage(position.unrealized_pnl_pct)}`); }
+    const metrics = row.querySelectorAll(".position-metrics em");
+    if (metrics[1]) text(metrics[1], money(position.market_value));
+    if (metrics[2]) text(metrics[2], money(position.cost_value));
+    if (metrics[3]) text(metrics[3], money(position.daily_pnl));
+  });
+}
+
+function setTickerStatus(message, tone) {
+  const root = $("tickerStatus"); if (!root) return;
+  root.dataset.state = tone; const label = root.querySelector("span"); text(label || root, message);
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { if (state.tickerTimer) window.clearTimeout(state.tickerTimer); state.tickerTimer = null; setTickerStatus("页面已隐藏，自动报价暂停", "paused"); }
+  else scheduleTicker(0);
+});
 
 function radarRow(title, meta, value, tone = "flat") {
   const row = document.createElement("div"); row.className = "radar-row";
@@ -325,6 +435,7 @@ async function refreshMorningRadar() {
 
 function renderReport(report) {
   $("emptyReport").hidden = true; $("reportContent").hidden = false;
+  renderScenarioPanel(report);
   text($("reportDate"), report.analysis_date); text($("reportSymbol"), report.symbol); text($("reportTitle"), report.name);
   const realtime = report.realtime_quote;
   const dataLabel = `研究数据：${report.data_status || "未知"}`;
@@ -334,7 +445,7 @@ function renderReport(report) {
   [["基本", report.fundamental_score], ["技术", report.technical_score], ["资金", report.capital_flow_score], ["题材", report.theme_score]].forEach(([label, value]) => scores.append(scoreTile(label, value)));
   text($("actionPlan"), report.action_plan);
   const risks = $("risks"); risks.replaceChildren(); (report.risk_factors || []).slice(0, 4).forEach((risk) => { const li = document.createElement("li"); text(li, risk); risks.append(li); });
-  const skills = $("skills"); skills.replaceChildren(); (report.skill_insights || []).forEach((skill) => {
+  const skills = $("skills"); skills.replaceChildren(); (report.skill_insights || []).filter((skill) => !["next_session_scenario", "price_observation_zones"].includes(skill.details?.mode)).forEach((skill) => {
     const row = document.createElement("div"); row.className = "skill-row";
     const main = document.createElement("div"); main.className = "skill-row-main";
     const left = document.createElement("div"); const title = document.createElement("strong"); const desc = document.createElement("span");
@@ -354,6 +465,112 @@ function renderReport(report) {
   text($("modelInterpretationTitle"), execution ? `${execution.provider_name} · ${execution.model} 解释` : "模型解释");
   text($("modelInterpretation"), report.model_interpretation);
 }
+
+function renderScenarioPanel(report) {
+  const panel = $("scenarioPanel");
+  const insights = report.skill_insights || [];
+  const scenario = insights.find((item) => item.details?.mode === "next_session_scenario");
+  const zones = insights.find((item) => item.details?.mode === "price_observation_zones");
+  panel.replaceChildren();
+  panel.hidden = !scenario && !zones;
+  if (panel.hidden) return;
+
+  const header = document.createElement("div"); header.className = "scenario-panel__head";
+  const heading = document.createElement("div");
+  const eyebrow = document.createElement("span"); eyebrow.className = "scenario-panel__eyebrow"; text(eyebrow, "SCENARIO LAB");
+  const title = document.createElement("h4"); text(title, "明日情景与价格观察区");
+  heading.append(eyebrow, title);
+  const badge = document.createElement("b"); badge.className = "scenario-panel__badge"; text(badge, "历史观察 ≠ 涨跌预测");
+  header.append(heading, badge); panel.append(header);
+
+  const grid = document.createElement("div"); grid.className = "scenario-grid";
+  grid.append(renderNextSessionCard(scenario), renderPriceZoneCard(zones));
+  panel.append(grid);
+}
+
+function renderNextSessionCard(insight) {
+  const card = document.createElement("article"); card.className = "scenario-card next-session-card";
+  card.append(scenarioCardHead("01", "次日红 / 平 / 绿盘观察"));
+  const details = insight?.details || {};
+  if (!insight || details.available === false || !Number.isFinite(Number(details.sample_size)) || Number(details.sample_size) < 1) {
+    card.append(scenarioEmpty(insight?.conclusion || "没有达到最小历史样本门槛，不显示百分比。"));
+    return card;
+  }
+  const red = Number(details.red_rate_pct || 0); const flat = Number(details.flat_rate_pct || 0); const green = Number(details.green_rate_pct || 0);
+  const values = document.createElement("div"); values.className = "scenario-rates";
+  values.append(rateBlock("红盘观察", red, "up"), rateBlock("平盘观察", flat, "flat"), rateBlock("绿盘观察", green, "down"));
+  const bar = document.createElement("div"); bar.className = "scenario-distribution"; bar.setAttribute("role", "img");
+  bar.setAttribute("aria-label", `历史样本中红盘 ${red.toFixed(1)}%，平盘 ${flat.toFixed(1)}%，绿盘 ${green.toFixed(1)}%`);
+  [["up", red], ["flat", flat], ["down", green]].forEach(([kind, value]) => {
+    const segment = document.createElement("i"); segment.className = kind; segment.style.width = `${Math.max(0, value)}%`; bar.append(segment);
+  });
+  const meta = document.createElement("p"); meta.className = "scenario-meta";
+  text(meta, `${insight.stage} · n=${details.sample_size} · ${details.sample_start || "—"} 至 ${details.sample_end || "—"} · 来源 ${formatSourceIds(details.source_ids)}`);
+  const note = document.createElement("p"); note.className = "scenario-caveat";
+  text(note, details.sample_mode === "baseline" ? "相似状态样本未达门槛，当前展示全样本基准，不能形成方向性结论。" : "仅表示相同状态在历史样本中的结果分布，不代表明日发生概率。");
+  card.append(values, bar, meta, note); return card;
+}
+
+function renderPriceZoneCard(insight) {
+  const card = document.createElement("article"); card.className = "scenario-card price-zone-card";
+  card.append(scenarioCardHead("02", "多周期价格观察区"));
+  const details = insight?.details || {};
+  if (!insight || details.available === false || !details.short_term) {
+    card.append(scenarioEmpty(insight?.conclusion || "价格历史或波动尺度不足，未生成区间。"));
+    return card;
+  }
+  const price = document.createElement("div"); price.className = "zone-current";
+  const priceLabel = document.createElement("span"); text(priceLabel, "当前收盘参考");
+  const priceValue = document.createElement("strong"); text(priceValue, formatPrice(details.current_price)); price.append(priceLabel, priceValue);
+  const zoneGrid = document.createElement("div"); zoneGrid.className = "zone-grid";
+  zoneGrid.append(
+    zoneBlock("短线低位观察区", details.short_term.support_zone, "support"),
+    zoneBlock("短线反弹压力区", details.short_term.resistance_zone, "resistance"),
+    zoneBlock("中期支撑观察区", details.medium_term?.support_zone, "support"),
+    zoneBlock("中期压力观察区", details.medium_term?.resistance_zone, "resistance")
+  );
+  const conditions = document.createElement("div"); conditions.className = "zone-conditions";
+  const invalid = document.createElement("span"); text(invalid, `跌破失效参考 ${formatPrice(details.short_term.invalidation_below)}`);
+  const confirm = document.createElement("span"); text(confirm, `突破确认参考 ${formatPrice(details.short_term.confirmation_above)}`);
+  conditions.append(invalid, confirm);
+  const longTerm = document.createElement("p"); longTerm.className = "scenario-caveat";
+  text(longTerm, details.long_term?.available ? `长期估值观察区 ${formatZone(details.long_term.target_zone)}` : `长期：${details.long_term?.reason || "估值历史不足，不生成目标价。"}`);
+  const meta = document.createElement("p"); meta.className = "scenario-meta";
+  text(meta, `ATR ${Number(details.atr || 0).toFixed(3)} · 截止 ${details.as_of || "—"} · 来源 ${formatSourceIds(details.source_ids)}`);
+  card.append(price, zoneGrid, conditions, longTerm, meta); return card;
+}
+
+function scenarioCardHead(index, titleText) {
+  const head = document.createElement("div"); head.className = "scenario-card__head";
+  const indexElement = document.createElement("span"); text(indexElement, index);
+  const title = document.createElement("h5"); text(title, titleText); head.append(indexElement, title); return head;
+}
+
+function rateBlock(label, value, kind) {
+  const block = document.createElement("div"); block.className = `scenario-rate ${kind}`;
+  const name = document.createElement("span"); text(name, label);
+  const number = document.createElement("strong"); text(number, `${Number(value).toFixed(1)}%`); block.append(name, number); return block;
+}
+
+function zoneBlock(label, zone, kind) {
+  const block = document.createElement("div"); block.className = `zone-block ${kind}`;
+  const name = document.createElement("span"); text(name, label);
+  const value = document.createElement("strong"); text(value, formatZone(zone)); block.append(name, value); return block;
+}
+
+function scenarioEmpty(message) {
+  const empty = document.createElement("div"); empty.className = "scenario-empty";
+  const title = document.createElement("strong"); text(title, "证据不足，拒绝估计");
+  const detail = document.createElement("p"); text(detail, message); empty.append(title, detail); return empty;
+}
+
+function formatZone(zone) {
+  return Array.isArray(zone) && zone.length === 2 && zone.every((item) => Number.isFinite(Number(item)))
+    ? `${Number(zone[0]).toFixed(2)} – ${Number(zone[1]).toFixed(2)}` : "暂不可用";
+}
+
+function formatPrice(value) { return value !== null && value !== undefined && Number.isFinite(Number(value)) ? Number(value).toFixed(2) : "暂不可用"; }
+function formatSourceIds(sourceIds) { return Array.isArray(sourceIds) && sourceIds.length ? sourceIds.join("、") : "未取得"; }
 
 function normalizeCommitteeCourt(committee) {
   if (!committee) return null;
@@ -517,6 +734,7 @@ function closeCommittee() { $("committeeModal").hidden = true; }
 async function loadDashboard() {
   try {
     const [{ data: health }, { data: profile }, { data: tools }, { data: playbooks }, { data: watchlist }, { data: portfolio }, { data: models }] = await Promise.all([api("/api/health"), api("/api/profile"), api("/api/tools"), api("/api/playbooks"), api("/api/watchlist"), api("/api/portfolio"), api("/api/models")]);
+    configureTicker(health.realtime_ticker);
     text($("serverStatus"), `本地引擎已就绪 · ${health.data_provider}`); renderProfile(profile); renderTools(tools.tools); renderPlaybooks(playbooks); renderWatchlist(watchlist.items); renderPortfolio(portfolio); renderModels(models);
   } catch (error) { text($("serverStatus"), `连接失败：${error.message}`); }
 }
@@ -598,6 +816,19 @@ $("importInput").addEventListener("change", async (event) => {
   const file = event.target.files[0]; if (!file) return;
   try { const bundle = JSON.parse(await file.text()); const { data } = await api("/api/memory/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) }); text($("memoryMessage"), `已合并：分析 ${data.added_events.analysis}，反馈 ${data.added_events.feedback}，问答 ${data.added_events.interaction}`); await loadDashboard(); }
   catch (error) { text($("memoryMessage"), `导入失败：${error.message}`); } finally { event.target.value = ""; }
+});
+
+function syncTickerTrackingFromDom() {
+  state.tickerTrackedCount = new Set([
+    ...Array.from(document.querySelectorAll(".watch-row[data-symbol]"), (row) => row.dataset.symbol),
+    ...Array.from(document.querySelectorAll(".position-row[data-symbol]"), (row) => row.dataset.symbol),
+  ]).size;
+  if (state.tickerTrackedCount > 0) scheduleTicker(0);
+  else setTickerStatus("加入自选或持仓后自动报价", "paused");
+}
+
+["watchlistRows", "positionRows"].forEach((id) => {
+  const root = $(id); if (root) new MutationObserver(syncTickerTrackingFromDom).observe(root, { childList: true });
 });
 
 setToday(); loadDashboard();

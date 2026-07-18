@@ -48,7 +48,13 @@ def _validate(data: object) -> None:
     required_paths = [
         ("rule_version",), ("runtime", "network_timeout_seconds"), ("runtime", "network_retry"), ("runtime", "llm_network_timeout_seconds"),
         ("runtime", "llm_request", "temperature"), ("runtime", "llm_request", "max_tokens"),
+        ("runtime", "llm_request", "continuation_max_tokens"), ("runtime", "llm_request", "max_continuations"),
         ("runtime", "snapshot_max_workers"),
+        ("runtime", "realtime_ticker", "refresh_interval_ms"),
+        ("runtime", "realtime_ticker", "non_realtime_interval_ms"),
+        ("runtime", "realtime_ticker", "error_backoff_ms"),
+        ("runtime", "realtime_ticker", "animation_duration_ms"),
+        ("runtime", "realtime_ticker", "maximum_symbols"),
         ("opportunity_pipeline", "source_priority"),
         ("opportunity_pipeline", "level1"),
         ("opportunity_pipeline", "level2"),
@@ -56,6 +62,19 @@ def _validate(data: object) -> None:
         ("opportunity_pipeline", "ranking"),
         ("opportunity_pipeline", "lifecycle"),
         ("providers", "eastmoney", "kline_url"), ("providers", "eastmoney", "headers"),
+        ("providers", "high_availability", "route_order"),
+        ("providers", "high_availability", "circuit_breaker"),
+        ("providers", "high_availability", "verified_cache"),
+        ("providers", "high_availability", "source_lag"),
+        ("providers", "high_availability", "quality_summary"),
+        ("providers", "public_fallback", "tencent_kline_url"),
+        ("providers", "public_fallback", "sina_market_count_url"),
+        ("providers", "public_fallback", "sina_market_list_url"),
+        ("providers", "public_fallback", "financial_metrics"),
+        ("providers", "public_fallback", "money_flow_fields"),
+        ("providers", "public_fallback", "sina_tick_function"),
+        ("providers", "public_fallback", "sina_tick_fields"),
+        ("providers", "public_fallback", "sina_tick_direction_codes"),
         ("providers", "sina", "quote_url"), ("providers", "sina", "headers"),
         ("providers", "tushare", "token_env"), ("providers", "tushare", "interfaces"),
         ("providers", "tushare", "capabilities"),
@@ -120,6 +139,8 @@ def _validate(data: object) -> None:
         ("domain_knowledge", "announcement_timeliness"),
         ("domain_knowledge", "industry_prosperity"),
         ("domain_knowledge", "risk_scanner"),
+        ("domain_knowledge", "next_session_scenario"),
+        ("domain_knowledge", "price_observation_zones"),
         ("backtest", "playbook_rules", "trend_core"),
         ("backtest", "playbook_rules", "hot_money_leader"),
         ("backtest", "playbook_rules", "institutional_growth"),
@@ -136,6 +157,27 @@ def _validate(data: object) -> None:
     retry = settings.get("runtime", "network_retry")
     if retry["max_attempts"] < 1 or retry["initial_backoff_seconds"] < 0 or retry["max_backoff_seconds"] < retry["initial_backoff_seconds"]:
         raise RuntimeError("runtime.network_retry must use bounded positive attempts and backoff")
+    llm_request = settings.get("runtime", "llm_request")
+    if (
+        not isinstance(llm_request["max_tokens"], int)
+        or llm_request["max_tokens"] <= 0
+        or not isinstance(llm_request["continuation_max_tokens"], int)
+        or llm_request["continuation_max_tokens"] <= 0
+        or not isinstance(llm_request["max_continuations"], int)
+        or llm_request["max_continuations"] < 0
+    ):
+        raise RuntimeError("runtime.llm_request token and continuation limits must be positive integers")
+    ticker = settings.get("runtime", "realtime_ticker")
+    if ticker["refresh_interval_ms"] < 1000:
+        raise RuntimeError("runtime.realtime_ticker.refresh_interval_ms must be at least 1000")
+    if ticker["error_backoff_ms"] < ticker["refresh_interval_ms"]:
+        raise RuntimeError("runtime.realtime_ticker.error_backoff_ms must not be shorter than the refresh interval")
+    if ticker["non_realtime_interval_ms"] < ticker["refresh_interval_ms"]:
+        raise RuntimeError("runtime.realtime_ticker.non_realtime_interval_ms must not be shorter than the live interval")
+    if not 100 <= ticker["animation_duration_ms"] < ticker["refresh_interval_ms"]:
+        raise RuntimeError("runtime.realtime_ticker animation must finish before the next refresh")
+    if ticker["maximum_symbols"] < 1:
+        raise RuntimeError("runtime.realtime_ticker.maximum_symbols must be positive")
     score_min = settings.get("scoring", "score_bounds", "min")
     score_max = settings.get("scoring", "score_bounds", "max")
     opportunity = settings.get("opportunity_pipeline")
@@ -214,6 +256,72 @@ def _validate(data: object) -> None:
         raise RuntimeError("technical.moving_average_windows must include every scoring MA window")
     if scoring_technical["ma_long"] not in technical["return_windows"]:
         raise RuntimeError("technical.return_windows must include scoring.technical.ma_long")
+    next_session = settings.get("domain_knowledge", "next_session_scenario")
+    next_session_windows = {
+        next_session["minimum_feature_bars"],
+        next_session["trend_window"],
+        next_session["momentum_window"],
+        next_session["atr_window"] + 1,
+    }
+    if any(not isinstance(window, int) or window < 2 for window in next_session_windows):
+        raise RuntimeError("next-session scenario windows must be integers of at least two")
+    if max(next_session_windows) >= technical["history_bars"]:
+        raise RuntimeError("technical.history_bars must leave at least one outcome bar for next-session scenarios")
+    if next_session["minimum_similar_samples"] < 1 or next_session["minimum_baseline_samples"] < 1:
+        raise RuntimeError("next-session scenario sample minimums must be positive")
+    if not 0 <= next_session["flat_band_pct"] < 100:
+        raise RuntimeError("next-session flat band must be between zero and 100")
+    if not 0 < next_session["volatility_low_pct"] < next_session["volatility_high_pct"]:
+        raise RuntimeError("next-session volatility thresholds must be positive and ordered")
+    if next_session["wilson_z"] <= 0:
+        raise RuntimeError("next-session Wilson z score must be positive")
+    zones = settings.get("domain_knowledge", "price_observation_zones")
+    zone_windows = {
+        zones["atr_window"] + 1,
+        zones["short_lookback"],
+        zones["short_pivot_window"],
+        zones["medium_lookback"],
+        zones["minimum_short_bars"],
+        zones["minimum_medium_bars"],
+    }
+    if any(not isinstance(window, int) or window < 2 for window in zone_windows):
+        raise RuntimeError("price-observation windows must be integers of at least two")
+    if max(zone_windows) > technical["history_bars"]:
+        raise RuntimeError("technical.history_bars must cover price-observation windows")
+    zone_multipliers = (
+        zones["short_zone_atr_half_width"],
+        zones["medium_zone_atr_half_width"],
+        zones["invalidation_atr_distance"],
+        zones["breakout_atr_distance"],
+    )
+    if any(float(value) < 0 for value in zone_multipliers):
+        raise RuntimeError("price-observation ATR multipliers cannot be negative")
+    breadth = settings.get("domain_knowledge", "market_breadth_confirmation")
+    if breadth["top_amount_count"] < 1 or breadth["minimum_limit_balance"] < 0:
+        raise RuntimeError("market breadth concentration and limit-balance settings must be non-negative")
+    if not 0 <= breadth["breadth_bearish_pct"] < breadth["breadth_bullish_pct"] <= 100:
+        raise RuntimeError("market breadth bullish/bearish thresholds are invalid")
+    if breadth["neutral_band_pct"] < 0 or breadth["index_median_divergence_pct"] < 0:
+        raise RuntimeError("market breadth divergence thresholds cannot be negative")
+    if not 0 <= breadth["concentration_warning_pct"] <= 100:
+        raise RuntimeError("market breadth concentration warning must be between zero and one hundred")
+    if set(breadth["stages"]) != {"一致确认", "局部分化", "权重背离"} or any(
+        not 0 <= float(stage["confidence_cap"]) <= 1
+        for stage in breadth["stages"].values()
+    ):
+        raise RuntimeError("market breadth stages or confidence caps are invalid")
+    if not 0 <= float(breadth["insufficient_confidence_cap"]) <= 1:
+        raise RuntimeError("market breadth insufficient confidence cap must be between zero and one")
+    financial_quality = settings.get("domain_knowledge", "financial_quality")
+    if (
+        float(financial_quality["non_recurring_warning_pct"]) <= 0
+        or float(financial_quality["amount_display_divisor"]) <= 0
+        or not str(financial_quality["amount_display_unit"]).strip()
+    ):
+        raise RuntimeError("financial quality thresholds and display units are invalid")
+    public_fallback = settings.get("providers", "public_fallback")
+    if not public_fallback["fundamental_quality_fields"]:
+        raise RuntimeError("public fallback fundamental quality fields cannot be empty")
     if settings.get("data_quality", "raw_snapshots", "max_records_per_snapshot") < 1:
         raise RuntimeError("raw_snapshots.max_records_per_snapshot must be positive")
     if settings.get("providers", "akshare", "bulk_snapshot_cache", "maximum_age_minutes") <= 0:

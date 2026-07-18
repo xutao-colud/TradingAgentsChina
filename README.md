@@ -152,7 +152,7 @@ Run the first dashboard version:
 python -m app.web.server --host 0.0.0.0 --port 8000
 ```
 
-On this computer, open `http://127.0.0.1:8000`. Devices on the same trusted Wi-Fi/LAN can use `http://<this-computer's-IPv4>:8000`; run `ipconfig` on Windows to find the IPv4 address. The dashboard listens on all local network interfaces, but model-key configuration remains disabled for non-local requests. Keep the firewall rule on the **Private** profile only and do not expose or port-forward this service to the public internet.
+On this computer, open `http://127.0.0.1:8000`. Devices on the same trusted Wi-Fi/LAN can use `http://<this-computer's-IPv4>:8000`; run `ipconfig` on Windows to find the IPv4 address. The dashboard listens on all local network interfaces. Model-key entry is accepted only when the TCP client address is loopback or an address assigned to the server machine itself; other LAN devices cannot submit or clear keys. Configure keys from the server computer, or set the provider environment variable before startup. Keep the firewall rule on the **Private** profile only and do not expose or port-forward this service to the public internet.
 
 The server defaults to `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It never substitutes `SampleMarketDataProvider` unless the operator explicitly starts it with `--provider sample`.
 

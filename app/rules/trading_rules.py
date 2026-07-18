@@ -50,7 +50,9 @@ def invalid_conditions(profile: StockProfile, prices: list[DailyPrice]) -> list[
         conditions.append("股票带 ST/*ST 风险标识，需降低结论等级。")
     if prices:
         latest = prices[-1]
-        if latest.amount < liquidity["minimum_amount"]:
+        if latest.amount is None:
+            conditions.append("最近成交额数据缺失，流动性条件无法核验。")
+        elif latest.amount < liquidity["minimum_amount"]:
             conditions.append("最近成交额低于 3000 万元，流动性不足。")
         if latest.turnover_rate is None:
             conditions.append("最近换手率数据缺失，短线流动性条件无法核验。")

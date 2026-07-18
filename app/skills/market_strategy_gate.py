@@ -41,13 +41,14 @@ def select_market_eligible_playbooks(insights: list[SkillInsight]) -> SkillInsig
     ]
     risks: list[str] = ["该门槛只决定研究路线是否适配；个股仍须通过证据链、风险和交易规则审查。"]
 
-    if sentiment_stage == "数据不足":
-        allowed = []
-        excluded = list(config["all_playbooks"])
-        stage = "数据不足"
-        score = config["insufficient_score"]
-        conclusion = "连续情绪观察不足，无法识别启动、加速或退潮；不应据单日市场统计选择战法。"
-        strategy = "先补齐配置要求数量的连续情绪观察，再重新评估市场状态与研究路线。"
+    sentiment_incomplete = bool(sentiment and sentiment.details.get("coverage_status") in {"partial", "insufficient"})
+    if sentiment_stage == "数据不足" or sentiment_incomplete:
+        allowed = list(config["sentiment_unavailable_allowed_playbooks"])
+        excluded = list(config["sentiment_unavailable_excluded_playbooks"])
+        stage = "情绪历史不足·防守研究"
+        score = config["sentiment_unavailable_score"]
+        conclusion = "连续情绪观察不足，禁用依赖连板/炸板周期的进攻路线；仅保留不依赖该缺口的防守型研究。"
+        strategy = "只比较价值与风险证据，并继续补齐连续情绪历史；本门槛不生成交易指令。"
         risks.append("单日涨停、炸板或连板数据不能替代情绪周期判断。")
     elif sentiment_stage in set(config["defensive_stages"]) or temperature_score < config["defensive_threshold"] or money_making_score < config["defensive_threshold"]:
         allowed = ["institutional_value_dividend"]

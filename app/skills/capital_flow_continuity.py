@@ -21,6 +21,34 @@ def analyze_capital_flow_continuity(
             risks=["重复日期可能放大累计净额或连续天数。"],
             details={"observations": len(ordered_history), "source_ids": source_ids},
         )
+    if 0 < len(ordered_history) < config["minimum_history_points"]:
+        observed_main = [item.main_net_inflow for item in ordered_history if item.main_net_inflow is not None]
+        cumulative = sum(observed_main) if observed_main else None
+        return SkillInsight(
+            skill="资金流连续性分析",
+            category="capital",
+            stage="样本积累中",
+            score=clamp_score(config["neutral_score"]),
+            conclusion=(
+                f"已取得 {len(ordered_history)} 个不同交易日的真实资金观察，但尚未达到 "
+                f"{config['minimum_history_points']} 日连续性门槛。"
+            ),
+            strategy="仅展示已观察区间和累计方向；继续积累交易日，不把短样本外推为连续趋势。",
+            evidence=[
+                f"历史区间：{ordered_history[0].trade_date} 至 {ordered_history[-1].trade_date}",
+                f"有效历史观察 {len(ordered_history)}/{config['minimum_history_points']} 条",
+                f"已观察主力净额合计：{_format_optional(cumulative)}",
+            ],
+            risks=["样本尚短，只能说明已观察区间，不能生成3日/5日连续流入、流出或价资背离结论。"],
+            details={
+                "observations": len(ordered_history),
+                "required_observations": config["minimum_history_points"],
+                "coverage_status": "accumulating",
+                "observed_cumulative_main_flow": cumulative,
+                "source_ids": source_ids,
+                "as_of": ordered_history[-1].trade_date,
+            },
+        )
     if len(ordered_history) < config["minimum_history_points"]:
         return SkillInsight(
             skill="资金流连续性分析",

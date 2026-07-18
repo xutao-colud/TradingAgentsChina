@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.agents.common import clamp_score, confidence_from_score
 from app.config.runtime import load_runtime_settings
+from app.indicators.market_breadth import evaluate_market_breadth_confirmation
 from app.schemas.report import AgentFinding, MarketContext
 
 
@@ -32,10 +33,12 @@ def analyze_market(context: MarketContext) -> AgentFinding:
     decliners = int(context.decliners)
     breadth = advancers / max(1, advancers + decliners)
     config = load_runtime_settings().get("scoring", "market")
+    breadth_confirmation = evaluate_market_breadth_confirmation(context)
     neutral = load_runtime_settings().get("scoring", "score_bounds", "neutral")
     score = neutral + float(context.index_change_pct) * config["index_weight"] + (breadth - 0.5) * config["breadth_weight"]
     score += min(config["limit_up_cap"], int(context.limit_up_count) / config["limit_up_divisor"])
     score -= min(config["limit_down_cap"], int(context.limit_down_count) / config["limit_down_divisor"])
+    score += breadth_confirmation.score_adjustment
     final_score = clamp_score(score)
     conclusion = "市场情绪弱修复" if final_score >= config["repair_threshold"] else "市场环境偏谨慎"
     if final_score >= config["positive_threshold"]:
@@ -46,7 +49,7 @@ def analyze_market(context: MarketContext) -> AgentFinding:
         agent="市场周期 Agent",
         conclusion=conclusion,
         score=final_score,
-        confidence=confidence_from_score(final_score),
+        confidence=min(confidence_from_score(final_score), breadth_confirmation.confidence_cap),
         evidence=[
             f"{context.index_name}涨跌幅 {float(context.index_change_pct):.2f}%",
             f"上涨/下跌家数 {context.advancers}/{context.decliners}",
@@ -54,13 +57,15 @@ def analyze_market(context: MarketContext) -> AgentFinding:
             f"封板率 {context.sealed_limit_up_rate:.1f}%，一字板 {context.one_price_limit_up_count} 家，连板梯队 {context.board_ladder}" if context.sealed_limit_up_rate is not None else "涨停结构数据不足",
             f"动态游资情绪周期：{context.hot_money_cycle}",
             f"数据时间：{context.as_of}",
+            f"市场广度交叉核验：{breadth_confirmation.stage}",
+            *breadth_confirmation.evidence,
         ],
         risks=(
             ["若成交额继续萎缩，修复可能转为弱反弹。"]
             if float(context.total_amount) < config["low_amount"]
-            else ["市场广度可能被少数权重股扭曲，需与成交额和涨跌停反馈交叉核验。"]
-        ) + list(context.unavailable_reasons),
-        counterpoints=["单日市场状态不能代表中期趋势。"],
+            else ["市场状态仅描述同一时点，盘中成交和涨跌停结构变化可能使交叉确认失效。"]
+        ) + breadth_confirmation.risks + list(context.unavailable_reasons),
+        counterpoints=["单日市场状态不能代表中期趋势。", *breadth_confirmation.counterpoints],
         invalidation_conditions=["上涨家数转弱且跌停数量连续增加。", "成交额持续低于近期均值，风险偏好未获确认。"],
         source_ids=["market-001"],
     )

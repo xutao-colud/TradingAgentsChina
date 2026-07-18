@@ -8,6 +8,23 @@ from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 
 
 class StockSnapshotTest(unittest.TestCase):
+    def test_quote_refresh_does_not_request_money_flow(self) -> None:
+        quote_payload = {"data": {"f43": 607, "f57": "000725", "f58": "京东方A", "f60": 600, "f170": 117}}
+        requested_urls: list[str] = []
+
+        def fetch_text(url: str) -> str:
+            requested_urls.append(url)
+            return json.dumps(quote_payload, ensure_ascii=False)
+
+        client = EastmoneyStockSnapshotClient(fetch_text=fetch_text, now=lambda: datetime(2026, 7, 17, 10, 0, 0))
+        quotes = client.fetch_quotes(["000725", "000725.SZ"])
+
+        self.assertEqual(list(quotes), ["000725.SZ"])
+        self.assertEqual(quotes["000725.SZ"].price, 6.07)
+        self.assertEqual(quotes["000725.SZ"].name, "京东方A")
+        self.assertEqual(len(requested_urls), 1)
+        self.assertNotIn("fflow", requested_urls[0])
+
     def test_fetch_snapshots_deduplicates_symbols_and_keeps_result_mapping(self) -> None:
         class RecordingClient(EastmoneyStockSnapshotClient):
             def __init__(self) -> None:

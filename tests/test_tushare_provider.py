@@ -84,10 +84,11 @@ class FakeTushare:
             "grossprofit_margin": values[3],
             "debt_to_assets": values[4],
             "ocf_yoy": 15,
+            "profit_dedt": 18,
         }]
 
     def income(self, **kwargs):
-        return [{"ann_date": "20260420", "end_date": "20260331", "total_revenue": 200, "n_income": 20}]
+        return [{"ann_date": "20260420", "end_date": "20260331", "total_revenue": 200, "n_income": 20, "n_income_attr_p": 20}]
 
     def balancesheet(self, **kwargs):
         return [{"ann_date": "20260420", "end_date": "20260331", "total_assets": 100, "total_hldr_eqy_exc_min_int": 50, "accounts_receiv": 20, "inventories": 10, "goodwill": 5}]
@@ -366,6 +367,9 @@ class TushareMarketDataProviderTest(unittest.TestCase):
         self.assertEqual(snapshot.net_profit_margin, 0.1)
         self.assertEqual(snapshot.asset_turnover, 2.0)
         self.assertEqual(snapshot.equity_multiplier, 2.0)
+        self.assertEqual(snapshot.deducted_net_income, 18)
+        self.assertEqual(snapshot.non_recurring_profit_impact, 2)
+        self.assertEqual(snapshot.non_recurring_profit_ratio, 10)
         source = next(
             item
             for item in self.provider.get_evidence_sources("600519", "2026-07-10")

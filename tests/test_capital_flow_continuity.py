@@ -59,11 +59,30 @@ class CapitalFlowContinuityTest(unittest.TestCase):
         self.assertEqual(result.details["main_streak_days"], 1)
         self.assertIsNone(result.details["cumulative_main_flow"]["3d"])
 
-    def test_short_history_is_explicitly_insufficient(self) -> None:
-        result = analyze_capital_flow_continuity(_prices([10, 10.1]), _history([1_000_000, 2_000_000]))
+    def test_empty_history_is_explicitly_insufficient(self) -> None:
+        result = analyze_capital_flow_continuity(_prices([10]), [])
 
         self.assertEqual(result.stage, "数据不足")
-        self.assertEqual(result.score, 0)
+
+    def test_one_verified_day_is_reported_as_accumulating(self) -> None:
+        result = analyze_capital_flow_continuity(_prices([10]), _history([1_000_000]))
+
+        self.assertEqual(result.stage, "样本积累中")
+        self.assertEqual(result.details["observations"], 1)
+        self.assertEqual(result.details["coverage_status"], "accumulating")
+
+    def test_two_verified_days_are_reported_as_accumulating_not_zero_data(self) -> None:
+        history = [
+            CapitalFlowObservation("2026-07-16", 10_000_000, source_ids=["flow-history-cache-001"]),
+            CapitalFlowObservation("2026-07-17", -3_000_000, source_ids=["flow-history-cache-001"]),
+        ]
+
+        result = analyze_capital_flow_continuity([], history)
+
+        self.assertEqual(result.stage, "样本积累中")
+        self.assertEqual(result.details["observations"], 2)
+        self.assertEqual(result.details["coverage_status"], "accumulating")
+        self.assertEqual(result.score, 50)
 
     def test_unaligned_dates_are_not_joined(self) -> None:
         history = [

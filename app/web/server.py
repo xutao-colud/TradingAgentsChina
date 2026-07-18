@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 from dataclasses import replace
+from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
@@ -17,7 +19,7 @@ from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
 from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
-from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
@@ -26,6 +28,11 @@ from app.rules.trading_rules import normalize_symbol
 
 
 STATIC_DIR = Path(__file__).with_name("static")
+MODEL_CONFIG_LOCAL_ONLY_ERROR = (
+    "模型密钥只能在运行服务的这台电脑上配置。"
+    "请在服务器电脑打开 http://127.0.0.1:8000，或使用该电脑自己的局域网 IP；"
+    "其他局域网设备请通过环境变量配置密钥。"
+)
 
 
 class ResearchWebApp:
@@ -59,7 +66,12 @@ class ResearchWebApp:
         )
 
     def health(self) -> dict[str, Any]:
-        return {"status": "ok", "mode": "local", "data_provider": type(self.workflow.provider).__name__}
+        return {
+            "status": "ok",
+            "mode": "local",
+            "data_provider": type(self.workflow.provider).__name__,
+            "realtime_ticker": load_runtime_settings().get("runtime", "realtime_ticker"),
+        }
 
     def profile(self) -> dict[str, Any]:
         return self.memory_store.load_profile().to_dict()
@@ -179,6 +191,42 @@ class ResearchWebApp:
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
             "source": source,
+        }
+
+    def refresh_ticker(self) -> dict[str, Any]:
+        """Refresh only prices for tracked symbols; full snapshots remain user-triggered."""
+        watchlist = self.memory_store.load_watchlist()
+        portfolio = self.memory_store.load_portfolio()
+        symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
+        maximum = int(load_runtime_settings().get("runtime", "realtime_ticker", "maximum_symbols"))
+        unique_symbols = list(dict.fromkeys(symbols))[:maximum]
+        quotes: dict[str, RealtimeQuote] = {}
+        fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
+        if callable(fetch_quotes):
+            quotes.update(fetch_quotes(unique_symbols))
+        missing_symbols = [
+            symbol for symbol in unique_symbols
+            if symbol not in quotes or quotes[symbol].data_status == "unavailable" or quotes[symbol].price is None
+        ]
+        if missing_symbols:
+            quotes.update(self.quote_client.fetch_quotes(missing_symbols))
+        available_sources = list(dict.fromkeys(
+            quote.source
+            for quote in quotes.values()
+            if quote.data_status != "unavailable" and quote.price is not None
+        ))
+        ticker_config = load_runtime_settings().get("runtime", "realtime_ticker")
+        live_session = any(
+            quote.data_status == "real_time" and quote.price is not None
+            for quote in quotes.values()
+        )
+        return {
+            "quotes": {symbol: quote.to_dict() for symbol, quote in quotes.items()},
+            "portfolio": build_portfolio_snapshot(portfolio, quotes),
+            "source": "+".join(available_sources) if available_sources else "unavailable",
+            "tracked_count": len(unique_symbols),
+            "refresh_interval_ms": ticker_config["refresh_interval_ms"] if live_session else ticker_config["non_realtime_interval_ms"],
+            "live_session": live_session,
         }
 
     def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -423,6 +471,8 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.OK, self.app.remove_position(payload))
             elif self.path == "/api/market/refresh":
                 self._write_json(HTTPStatus.OK, self.app.refresh_market())
+            elif self.path == "/api/market/ticker":
+                self._write_json(HTTPStatus.OK, self.app.refresh_ticker())
             elif self.path == "/api/morning/radar":
                 self._write_json(HTTPStatus.OK, self.app.morning_radar(payload))
             elif self.path == "/api/opportunities/scan":
@@ -431,12 +481,12 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.OK, self.app.replay_opportunity(payload))
             elif self.path == "/api/models/configure":
                 if not self._is_local_client():
-                    self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
+                    self._write_json(HTTPStatus.FORBIDDEN, {"error": MODEL_CONFIG_LOCAL_ONLY_ERROR})
                 else:
                     self._write_json(HTTPStatus.OK, self.app.configure_model(payload))
             elif self.path == "/api/models/clear":
                 if not self._is_local_client():
-                    self._write_json(HTTPStatus.FORBIDDEN, {"error": "Model key configuration is disabled on non-local hosts"})
+                    self._write_json(HTTPStatus.FORBIDDEN, {"error": MODEL_CONFIG_LOCAL_ONLY_ERROR})
                 else:
                     self._write_json(HTTPStatus.OK, self.app.clear_model_key(payload))
             elif self.path == "/api/memory/import":
@@ -462,8 +512,8 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
         return payload
 
     def _is_local_client(self) -> bool:
-        """Allow secret entry only from a loopback connection, never by headers."""
-        return _is_loopback_address(self.client_address[0])
+        """Allow secret entry from this machine, never by client-controlled headers."""
+        return _is_local_machine_address(self.client_address[0])
 
     def _serve_static(self) -> None:
         path_map = {
@@ -562,6 +612,55 @@ def _is_loopback_address(value: str) -> bool:
         return ip_address(value).is_loopback
     except ValueError:
         return False
+
+
+def _is_local_machine_address(
+    value: str, local_addresses: set[str] | frozenset[str] | None = None
+) -> bool:
+    """Recognize loopback and addresses assigned to the server itself.
+
+    The decision uses the TCP peer address plus OS-resolved interface addresses;
+    `Host`, `Origin`, and forwarding headers are intentionally ignored.
+    """
+    candidate = _normalized_ip(value)
+    if candidate is None:
+        return False
+    if candidate.is_loopback:
+        return True
+    addresses = local_addresses if local_addresses is not None else _local_machine_addresses()
+    return str(candidate) in {_normalized_ip_text(item) for item in addresses}
+
+
+@lru_cache(maxsize=1)
+def _local_machine_addresses() -> frozenset[str]:
+    addresses = {"127.0.0.1", "::1"}
+    hostnames = {socket.gethostname(), socket.getfqdn()}
+    for hostname in hostnames:
+        if not hostname:
+            continue
+        try:
+            records = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        except OSError:
+            continue
+        for record in records:
+            raw_address = str(record[4][0]).split("%", 1)[0]
+            normalized = _normalized_ip(raw_address)
+            if normalized is not None:
+                addresses.add(str(normalized))
+    return frozenset(addresses)
+
+
+def _normalized_ip(value: str):
+    try:
+        parsed = ip_address(str(value).split("%", 1)[0])
+    except ValueError:
+        return None
+    return getattr(parsed, "ipv4_mapped", None) or parsed
+
+
+def _normalized_ip_text(value: str) -> str:
+    parsed = _normalized_ip(value)
+    return str(parsed) if parsed is not None else ""
 
 
 def _optional_float(value: Any) -> float | None:

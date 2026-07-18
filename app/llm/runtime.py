@@ -132,6 +132,7 @@ class ModelRuntime:
                 }
                 raise RuntimeError("模型配置在研判过程中发生切换，本次旧模型结果已丢弃；请重新开始研判。")
         completed_at = _utc_now()
+        completion_metadata = dict(explained.model_execution or {})
         execution = {
             "status": "succeeded",
             "provider_id": provider.id,
@@ -140,6 +141,7 @@ class ModelRuntime:
             "base_url": provider.base_url,
             "started_at": started_at,
             "completed_at": completed_at,
+            **completion_metadata,
         }
         with self._lock:
             self._last_execution = execution

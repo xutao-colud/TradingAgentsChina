@@ -64,6 +64,25 @@ def bollinger(values: list[float], window: int, multiplier: float) -> tuple[floa
     return middle + spread, middle, middle - spread
 
 
+def average_true_range(prices: list[DailyPrice], window: int) -> float | None:
+    """Return Wilder's true-range mean without using future bars."""
+    if window <= 0 or len(prices) < window + 1:
+        return None
+    true_ranges: list[float] = []
+    start = len(prices) - window
+    for index in range(start, len(prices)):
+        current = prices[index]
+        previous_close = prices[index - 1].close
+        true_ranges.append(
+            max(
+                current.high - current.low,
+                abs(current.high - previous_close),
+                abs(current.low - previous_close),
+            )
+        )
+    return sum(true_ranges) / len(true_ranges)
+
+
 def kdj(prices: list[DailyPrice], window: int, smoothing: int) -> tuple[float | None, float | None, float | None]:
     if len(prices) < window:
         return None, None, None

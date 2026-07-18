@@ -43,6 +43,24 @@ class FundamentalAnalysisTest(unittest.TestCase):
         self.assertEqual(analysis.asset_turnover, 1.8)
         self.assertEqual(analysis.equity_multiplier, 2.1)
 
+    def test_non_recurring_profit_and_exact_missing_turnover_inputs_are_traceable(self) -> None:
+        complete = FundamentalSnapshot(
+            0, 0, 0, 0, 0, 0, 0, 0, "稳定",
+            revenue=200,
+            net_income=20,
+            total_assets=100,
+            total_equity=50,
+            deducted_net_income=14,
+        )
+        complete_analysis = analyze_fundamental_quality(complete)
+        missing_analysis = analyze_fundamental_quality(
+            FundamentalSnapshot(0, 0, 0, 0, 0, 0, 0, 0, "稳定", net_income=20)
+        )
+
+        self.assertEqual(complete_analysis.non_recurring_profit_impact, 6)
+        self.assertEqual(complete_analysis.non_recurring_profit_ratio, 30)
+        self.assertTrue(any("营业收入、总资产" in item for item in missing_analysis.unavailable_reasons))
+
 
 if __name__ == "__main__":
     unittest.main()

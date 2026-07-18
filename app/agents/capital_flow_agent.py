@@ -41,7 +41,12 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot, signals: AshareMarketSignals |
         evidence.append(f"中单净流入 {flow.medium_net_inflow / 100_000_000:.2f} 亿元")
     if flow.small_net_inflow is not None:
         evidence.append(f"小单净流入 {flow.small_net_inflow / 100_000_000:.2f} 亿元")
-    source_ids = ["flow-001"] if has_core_flow else []
+    if flow.trade_direction_net_inflow is not None:
+        evidence.append(
+            f"逐笔价格方向净额 {flow.trade_direction_net_inflow / 100_000_000:.2f} 亿元"
+            "（上涨逐笔成交额减下跌逐笔成交额，非主力资金口径）"
+        )
+    source_ids = ["flow-001"] if has_core_flow or flow.trade_direction_net_inflow is not None else []
     if flow.northbound_net_inflow is not None:
         source_ids.append("northbound-market-001")
     if signals and signals.margin_financing:
@@ -65,6 +70,8 @@ def analyze_capital_flow(flow: MoneyFlowSnapshot, signals: AshareMarketSignals |
     risks = ["资金流为短期指标，连续性比单日方向更重要。"]
     if missing_dimensions:
         risks.append(f"缺少资金维度：{', '.join(missing_dimensions)}；未按 0 或中性值参与评分。")
+    if flow.flow_method == "tick_price_direction":
+        risks.append("逐笔价格方向只能验证成交方向，不能识别机构、游资或主力身份，未参与主力资金评分。")
     conclusion = (
         "核心资金数据不足，当前不形成资金方向判断"
         if not has_core_flow

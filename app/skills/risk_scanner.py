@@ -218,7 +218,7 @@ def scan_a_share_risks(
 
     recent_prices = list((prices or [])[-int(config["liquidity_window_days"]):])
     minimum_observations = int(config["minimum_liquidity_observations"])
-    amount_values = [item.amount for item in recent_prices]
+    amount_values = [item.amount for item in recent_prices if item.amount is not None]
     liquidity_source_ids = _available_ids(["price-001"], source_by_id)
     average_amount = (
         mean(amount_values)
