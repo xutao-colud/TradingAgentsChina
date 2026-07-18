@@ -110,6 +110,24 @@ class VerifiedDatasetCache:
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return None
 
+    def load_prefix(
+        self,
+        dataset: str,
+        key_prefix: str,
+        factory: Callable[[dict[str, Any]], T],
+    ) -> list[tuple[T, dict[str, str]]]:
+        """Load every integrity-verified cache entry whose key starts with a prefix."""
+        directory = self.root / _safe(dataset)
+        if not directory.exists():
+            return []
+        prefix = _safe(key_prefix)
+        results: list[tuple[T, dict[str, str]]] = []
+        for path in sorted(directory.glob(f"{prefix}*.json")):
+            loaded = self.load(dataset, path.stem, factory)
+            if loaded is not None:
+                results.append(loaded)
+        return results
+
     def is_fresh(self, dataset: str, metadata: dict[str, str]) -> bool:
         config = load_runtime_settings().get("providers", "high_availability", "verified_cache")
         maximum = int(config["fresh_seconds"].get(dataset, 0))
@@ -140,6 +158,9 @@ class NullVerifiedDatasetCache:
 
     def load_list(self, *args: object, **kwargs: object) -> None:
         return None
+
+    def load_prefix(self, *args: object, **kwargs: object) -> list[object]:
+        return []
 
     def is_fresh(self, *args: object, **kwargs: object) -> bool:
         return False

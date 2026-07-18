@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.graph.workflow import build_sample_workflow
 from app.llm.runtime import ModelRuntime
+from app.llm.prompt_contracts import EXPLANATION_COMPLETE_MARKER
 from app.memory.local_store import LocalMemoryStore
 
 
@@ -27,7 +28,10 @@ class ModelRuntimeTest(unittest.TestCase):
                 self.assertEqual(payload["model"], "glm-5.1")
                 self.assertIn("反推验证", payload["messages"][0]["content"])
                 self.assertIn("反推验证任务", payload["messages"][1]["content"])
-                return {"choices": [{"message": {"content": "GLM 解释。"}}]}
+                return {"choices": [{
+                    "message": {"content": f"GLM 解释。\n{EXPLANATION_COMPLETE_MARKER}"},
+                    "finish_reason": "stop",
+                }]}
 
             runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)
             runtime.configure("glm", "test-secret-key")
@@ -37,6 +41,7 @@ class ModelRuntimeTest(unittest.TestCase):
             self.assertEqual(explained.model_interpretation, "GLM 解释。")
             self.assertEqual(explained.model_execution["provider_id"], "glm")
             self.assertEqual(explained.model_execution["model"], "glm-5.1")
+            self.assertTrue(explained.model_execution["complete"])
             self.assertEqual(runtime.status()["last_execution"]["status"], "succeeded")
 
     def test_rejects_unsaved_ui_selection_before_calling_model(self) -> None:
@@ -46,7 +51,10 @@ class ModelRuntimeTest(unittest.TestCase):
             def fake_post(url, headers, payload):
                 nonlocal called
                 called = True
-                return {"choices": [{"message": {"content": "不应执行"}}]}
+                return {"choices": [{
+                    "message": {"content": f"不应执行\n{EXPLANATION_COMPLETE_MARKER}"},
+                    "finish_reason": "stop",
+                }]}
 
             runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)
             runtime.configure("glm", "test-secret-key", "glm-5.1")

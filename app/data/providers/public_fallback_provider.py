@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
@@ -26,6 +26,10 @@ from app.schemas.report import (
     DataQualityReport,
     EvidenceSource,
     FundamentalSnapshot,
+    IndustryContext,
+    IndustryFlowObservation,
+    IntradayBar,
+    IntradaySnapshot,
     MarketContext,
     MoneyFlowSnapshot,
     StockProfile,
@@ -60,26 +64,142 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
         self._tencent_cache: dict[tuple[str, str, int], dict[str, Any]] = {}
         self._fundamental_cache: dict[tuple[str, str], FundamentalSnapshot] = {}
         self._flow_rows: dict[str, list[dict[str, Any]]] = {}
+        self._tick_cache: dict[tuple[str, str], tuple[list[dict[str, Any]], str | None]] = {}
         self._market_cache: dict[str, MarketContext] = {}
+        self._profile_cache: dict[str, StockProfile] = {}
+        self._industry_flow_cache: dict[str, tuple[list[dict[str, Any]], str | None]] = {}
 
     def get_provider_capabilities(self) -> list[ProviderCapabilities]:
         return [ProviderCapabilities(
             provider="public_fallback",
-            datasets=frozenset({"stock_profile", "daily_prices", "fundamentals", "money_flow", "market_context", "raw_snapshots", "data_quality"}),
+            datasets=frozenset({"stock_profile", "daily_prices", "fundamentals", "industry_context", "money_flow", "intraday", "market_context", "raw_snapshots", "data_quality"}),
             persists_raw_snapshots=True,
         )]
 
     def get_stock_profile(self, symbol: str) -> StockProfile:
         normalized = normalize_symbol(symbol)
+        cached = self._profile_cache.get(normalized)
+        if cached is not None:
+            return cached
         payload = self._tencent_payload(normalized, self._today().isoformat(), 2)
         quote = _tencent_quote(payload, normalized)
         name = str(quote[1]).strip() if len(quote) > 1 and str(quote[1]).strip() else normalized
-        return StockProfile(
+        industry = "未知"
+        rows, error = self._call_dataframe_result(
+            self.config["industry_classification_function"],
+            symbol=normalized.split(".")[0],
+            start_date=self.config["industry_classification_start_date"],
+            end_date=self._today().strftime("%Y%m%d"),
+        )
+        selected = _select_industry_classification(rows, self.config)
+        raw = self._save_raw(
+            "cninfo",
+            self.config["industry_classification_function"],
+            {"symbol": normalized, "end_date": self._today().isoformat()},
+            rows,
+            error or (None if selected else "provider returned no usable industry classification"),
+        )
+        if selected is not None:
+            industry = selected["industry"]
+            classified_name = selected.get("name")
+            if classified_name:
+                name = str(classified_name)
+            self._record_evidence(normalized, self._today().isoformat(), EvidenceSource(
+                "profile-001",
+                f"{normalized} 巨潮行业分类",
+                "cninfo_industry_classification",
+                str(selected.get("as_of") or self._today().isoformat()),
+                snapshot_ids=[raw.snapshot_id],
+            ))
+        profile = StockProfile(
             symbol=normalized,
             name=name,
-            industry="未知",
+            industry=industry,
             board=infer_board(normalized),
             is_st=name.upper().startswith(("ST", "*ST")),
+        )
+        self._profile_cache[normalized] = profile
+        return profile
+
+    def get_industry_context(self, symbol: str, analysis_date: str) -> IndustryContext:
+        normalized = normalize_symbol(symbol)
+        profile = self.get_stock_profile(normalized)
+        if profile.industry == "未知":
+            return IndustryContext(
+                "unavailable", profile.industry, analysis_date,
+                unavailable_reasons=["巨潮未返回可与行业资金横截面对齐的公开行业分类。"],
+            )
+        cached = self._industry_flow_cache.get(analysis_date)
+        if cached is None:
+            rows, error = self._call_dataframe_result(
+                self.config["industry_flow_function"], symbol=self.config["industry_flow_period"]
+            )
+            cached = (rows, error)
+            self._industry_flow_cache[analysis_date] = cached
+        rows, error = cached
+        fields = self.config["industry_flow_fields"]
+        multiplier = float(self.config["industry_flow_amount_multiplier"])
+        observations: list[IndustryFlowObservation] = []
+        for row in rows:
+            industry = str(row.get(fields["industry"], "")).strip()
+            net = _optional_float(row.get(fields["net_amount"]))
+            if not industry or net is None:
+                continue
+            observations.append(IndustryFlowObservation(
+                trade_date=analysis_date,
+                industry=industry,
+                industry_code=industry,
+                net_amount=net * multiplier,
+                pct_change=_percent(row.get(fields["pct_change"])),
+                company_count=_optional_int(row.get(fields["company_count"])),
+                source_id="industry-flow-public-001",
+            ))
+        raw = self._save_raw(
+            "ths",
+            self.config["industry_flow_function"],
+            {"trade_date": analysis_date},
+            rows,
+            error or (None if observations else "provider returned no usable industry flow cross-section"),
+        )
+        target = next((item for item in observations if item.industry == profile.industry), None)
+        minimum = int(self.config["industry_flow_minimum_universe"])
+        if target is None or len(observations) < minimum:
+            reasons = []
+            if error:
+                reasons.append(f"同花顺行业资金接口不可用：{error}")
+            if target is None:
+                reasons.append(f"巨潮分类“{profile.industry}”未在同日行业资金横截面中精确匹配；未使用模糊映射。")
+            if len(observations) < minimum:
+                reasons.append(f"行业资金横截面仅 {len(observations)} 条，少于配置要求 {minimum} 条。")
+            return IndustryContext(
+                "unavailable", profile.industry, analysis_date,
+                flow_observations=observations,
+                source_ids=["profile-001"] if profile.industry != "未知" else [],
+                unavailable_reasons=reasons,
+            )
+        self._record_evidence(normalized, analysis_date, EvidenceSource(
+            "industry-flow-001",
+            f"{analysis_date} 同花顺行业资金横截面",
+            "ths_industry_fund_flow",
+            analysis_date,
+            snapshot_ids=[raw.snapshot_id],
+        ))
+        self._quality[(normalized, analysis_date, "industry_flow_public")] = DataQualityReport(
+            provider="public_fallback",
+            dataset="industry_flow_public",
+            status="passed",
+            checked_records=len(rows),
+            valid_records=len(observations),
+            completeness=round(len(observations) / max(1, len(rows)), 4),
+            as_of=analysis_date,
+            snapshot_ids=[raw.snapshot_id],
+            blocking=False,
+        )
+        return IndustryContext(
+            "verified", profile.industry, analysis_date,
+            flow_observations=observations,
+            source_ids=["profile-001", "industry-flow-001"],
+            unavailable_reasons=["公开备用源只覆盖当日行业资金横截面；历史估值分位与产业链传导仍待独立来源核验。"],
         )
 
     def get_daily_prices(self, symbol: str, analysis_date: str, lookback_days: int) -> list[DailyPrice]:
@@ -214,11 +334,7 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
         """Use observable tick direction without inventing main-capital flow."""
         if price_as_of is None or price_as_of != analysis_date:
             return _empty_flow(price_as_of)
-        rows, error = self._call_dataframe_result(
-            self.config["sina_tick_function"],
-            symbol=_tencent_code(symbol),
-            date=analysis_date.replace("-", ""),
-        )
+        rows, error = self._sina_tick_rows(symbol, analysis_date)
         fields = self.config["sina_tick_fields"]
         minimum_time = str(self.config["sina_tick_minimum_time"])
         usable = [
@@ -238,12 +354,9 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
         down_amount = sum(amount(row) for row in usable if str(row.get(fields["direction"])) == down_code)
         gross_amount = sum(amount(row) for row in usable)
         raw_error = error or (None if usable else "provider returned no usable post-open tick records")
-        raw = self._save_raw(
-            "sina", self.config["sina_tick_function"],
-            {"symbol": symbol, "trade_date": analysis_date}, rows, raw_error,
-        )
         if not usable:
             return _empty_flow(price_as_of)
+        raw_ids = self._snapshot_ids(self.config["sina_tick_function"], symbol, analysis_date)
         self._quality[(symbol, analysis_date, "money_flow_tick_direction")] = DataQualityReport(
             provider="sina",
             dataset="money_flow_tick_direction",
@@ -252,7 +365,7 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
             valid_records=len(usable),
             completeness=round(len(usable) / len(rows), 4) if rows else 0.0,
             as_of=analysis_date,
-            snapshot_ids=[raw.snapshot_id],
+            snapshot_ids=raw_ids,
             issues=[DataQualityIssue(
                 "methodology_scope", "warning",
                 "逐笔价格方向净额不等同于供应商定义的主力资金净流入，仅用于验证成交方向。",
@@ -264,7 +377,7 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
             f"{symbol} 新浪逐笔成交价格方向净额（非主力资金口径）",
             "sina_tick_trade_direction",
             analysis_date,
-            snapshot_ids=[raw.snapshot_id],
+            snapshot_ids=raw_ids,
         ))
         return MoneyFlowSnapshot(
             main_net_inflow=None,
@@ -285,6 +398,48 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
         prices = self.get_daily_prices(normalized, analysis_date, 2)
         as_of = prices[-1].trade_date if prices else None
         return self._money_flow_from_sina_ticks(normalized, analysis_date, as_of)
+
+    def get_intraday_snapshot(self, symbol: str, analysis_date: str) -> IntradaySnapshot:
+        """Build auditable five-minute bars from Sina prints when Eastmoney is unavailable."""
+        normalized = normalize_symbol(symbol)
+        rows, error = self._sina_tick_rows(normalized, analysis_date)
+        fields = self.config["sina_tick_fields"]
+        period = int(load_runtime_settings().get("domain_knowledge", "intraday", "minute_period"))
+        grouped: dict[str, list[tuple[float, float]]] = {}
+        for row in rows:
+            time_text = str(row.get(fields["time"], ""))
+            price = _optional_float(row.get(fields["price"]))
+            volume = _optional_float(row.get(fields["volume"]))
+            if time_text < str(self.config["sina_tick_minimum_time"]) or price is None or volume is None or volume <= 0:
+                continue
+            try:
+                parsed = datetime.strptime(f"{analysis_date} {time_text}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            bucket_minute = parsed.minute - parsed.minute % period
+            bucket = parsed.replace(minute=bucket_minute, second=0).isoformat(sep=" ")
+            grouped.setdefault(bucket, []).append((price, volume))
+        bars = [
+            IntradayBar(
+                timestamp=timestamp,
+                open=prints[0][0],
+                high=max(item[0] for item in prints),
+                low=min(item[0] for item in prints),
+                close=prints[-1][0],
+                volume=sum(item[1] for item in prints),
+                amount=sum(item[0] * item[1] for item in prints),
+            )
+            for timestamp, prints in sorted(grouped.items())
+        ]
+        source_ids = ["intraday-bars-sina-001"] if bars else []
+        reasons = [] if bars else [error or "新浪逐笔成交未返回可用的盘中记录。"]
+        return IntradaySnapshot(
+            data_status="verified" if bars else "unavailable",
+            as_of=bars[-1].timestamp if bars else analysis_date,
+            bars=bars,
+            source_ids=source_ids,
+            unavailable_reasons=reasons,
+        )
 
     def get_announcements(self, symbol: str, analysis_date: str) -> list[Announcement]:
         return []
@@ -460,6 +615,29 @@ class PublicFallbackMarketDataProvider(MarketDataProvider):
             return list(frame or []), None
         except Exception as exc:
             return [], str(exc)[:500]
+
+    def _sina_tick_rows(self, symbol: str, analysis_date: str) -> tuple[list[dict[str, Any]], str | None]:
+        normalized = normalize_symbol(symbol)
+        key = (normalized, analysis_date)
+        cached = self._tick_cache.get(key)
+        if cached is not None:
+            return cached
+        rows, error = self._call_dataframe_result(
+            self.config["sina_tick_function"],
+            symbol=_tencent_code(normalized),
+            date=analysis_date.replace("-", ""),
+        )
+        raw_error = error or (None if rows else "provider returned no tick records")
+        self._save_raw(
+            "sina",
+            self.config["sina_tick_function"],
+            {"symbol": normalized, "trade_date": analysis_date},
+            rows,
+            raw_error,
+        )
+        result = (rows, raw_error)
+        self._tick_cache[key] = result
+        return result
 
     def _save_raw(
         self,
@@ -749,6 +927,34 @@ def _amount(value: object, units: dict[str, int]) -> float | None:
     return _optional_float(text)
 
 
+def _select_industry_classification(
+    rows: list[dict[str, Any]], config: dict[str, Any]
+) -> dict[str, object] | None:
+    fields = config["industry_classification_fields"]
+    standard_field = fields["standard_code"]
+    candidates = list(rows)
+    for standard_code in config["industry_classification_preferred_standard_codes"]:
+        matched = [row for row in rows if str(row.get(standard_field, "")).strip() == str(standard_code)]
+        if matched:
+            candidates = matched
+            break
+    as_of_field = fields["as_of"]
+    candidates.sort(key=lambda row: str(row.get(as_of_field, "")), reverse=True)
+    for row in candidates:
+        for level in fields["levels"]:
+            raw = row.get(level)
+            industry = str(raw).strip() if raw is not None else ""
+            if industry and industry.casefold() not in {"nan", "none", "null"}:
+                return {
+                    "industry": industry,
+                    "name": row.get(fields["name"]),
+                    "as_of": row.get(as_of_field),
+                    "standard_code": row.get(standard_field),
+                    "level": level,
+                }
+    return None
+
+
 def _percent(value: object) -> float | None:
     return _optional_float(str(value).strip().removesuffix("%")) if value is not None else None
 
@@ -772,3 +978,8 @@ def _optional_float(value: object) -> float | None:
         return parsed if math.isfinite(parsed) else None
     except (TypeError, ValueError):
         return None
+
+
+def _optional_int(value: object) -> int | None:
+    parsed = _optional_float(value)
+    return int(parsed) if parsed is not None else None

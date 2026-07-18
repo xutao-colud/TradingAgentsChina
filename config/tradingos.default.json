@@ -1,12 +1,13 @@
 {
-  "rule_version": "2026-07-16.1",
+  "rule_version": "2026-07-17.2",
   "runtime": {
     "network_timeout_seconds": 8,
     "network_retry": {"max_attempts": 2, "initial_backoff_seconds": 0.25, "max_backoff_seconds": 1.0},
     "llm_network_timeout_seconds": 45,
-    "llm_request": {"temperature": 0.2, "max_tokens": 1200},
+    "llm_request": {"temperature": 0.2, "max_tokens": 2400, "continuation_max_tokens": 1200, "max_continuations": 1},
     "local_server": {"host": "0.0.0.0", "port": 8000},
-    "snapshot_max_workers": 4
+    "snapshot_max_workers": 4,
+    "realtime_ticker": {"refresh_interval_ms": 3000, "non_realtime_interval_ms": 60000, "error_backoff_ms": 12000, "animation_duration_ms": 420, "maximum_symbols": 100}
   },
   "morning_radar": {
     "default_limit": 6,
@@ -121,6 +122,15 @@
       "fundamental_function": "stock_financial_abstract",
       "fundamental_quality_fields": ["revenue", "asset_turnover", "deducted_net_income"],
       "money_flow_function": "stock_fund_flow_individual",
+      "industry_classification_function": "stock_industry_change_cninfo",
+      "industry_classification_start_date": "19900101",
+      "industry_classification_preferred_standard_codes": ["008014", "008002", "008019", "008001"],
+      "industry_classification_fields": {"standard_code": "分类标准编码", "name": "新证券简称", "as_of": "变更日期", "levels": ["行业大类", "行业中类", "行业次类", "行业门类"]},
+      "industry_flow_function": "stock_fund_flow_industry",
+      "industry_flow_period": "即时",
+      "industry_flow_amount_multiplier": 100000000,
+      "industry_flow_minimum_universe": 3,
+      "industry_flow_fields": {"industry": "行业", "net_amount": "净额", "pct_change": "行业-涨跌幅", "company_count": "公司家数"},
       "sina_tick_function": "stock_intraday_sina",
       "sina_tick_minimum_time": "09:30:00",
       "sina_tick_fields": {"time": "ticktime", "price": "price", "volume": "volume", "previous_price": "prev_price", "direction": "kind"},
@@ -507,6 +517,8 @@
       }
     },
     "technical": {"history_bars": 120, "moving_average_windows": [5, 10, 20, 60, 120], "return_windows": [20, 60, 120], "ema_fast": 12, "ema_slow": 26, "macd_signal": 9, "boll_window": 20, "boll_std_multiplier": 2, "kdj_window": 9, "kdj_smoothing": 3, "cost_proxy_window": 60, "cost_proxy_bins": 8},
+    "next_session_scenario": {"minimum_feature_bars": 20, "trend_window": 20, "momentum_window": 5, "atr_window": 14, "minimum_similar_samples": 30, "minimum_baseline_samples": 30, "flat_band_pct": 0.2, "volatility_low_pct": 1.5, "volatility_high_pct": 3.0, "wilson_z": 1.96, "neutral_score": 50},
+    "price_observation_zones": {"atr_window": 14, "short_lookback": 20, "short_pivot_window": 10, "medium_lookback": 60, "short_zone_atr_half_width": 0.25, "medium_zone_atr_half_width": 0.5, "invalidation_atr_distance": 0.4, "breakout_atr_distance": 0.2, "minimum_short_bars": 20, "minimum_medium_bars": 60, "minimum_long_valuation_points": 24, "neutral_score": 50},
     "sentiment": {"minimum_history_points": 3, "recovery_velocity": 0.15, "retreat_velocity": -0.15, "high_level_score": 70, "low_level_score": 35, "acceleration_velocity": 0.1, "base_score": 50, "limit_up_scale": 4, "limit_down_scale": 2, "breakout_scale": 0.7, "premium_scale": 4, "board_scale": 2, "seal_rate_neutral_pct": 60, "seal_rate_weight": 0.15, "one_price_count_cap": 8, "one_price_count_weight": 0.5},
     "a_share_characteristics": {"minimum_seal_rate_pct": 0, "maximum_seal_rate_pct": 100, "strong_seal_rate_pct": 75, "weak_seal_rate_pct": 55, "seal_rate_center_pct": 50, "minimum_ladder_levels": 1, "high_board_labels": ["4板以上"], "neutral_score": 50, "seal_rate_weight": 0.4, "one_price_weight": 1.0, "one_price_score_cap": 10, "high_board_weight": 2.0, "high_board_score_cap": 12, "failed_breakout_weight": 0.35},
     "turnover_continuity": {"windows": [3, 5, 10], "minimum_history_points": 5, "flat_change_pct": 5, "change_score_scale_pct": 10, "extreme_turnover_rate_pct": 20, "neutral_score": 50, "trend_score_impact": 12, "price_confirmation_window": 5, "price_divergence_threshold_pct": 1},

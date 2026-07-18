@@ -27,7 +27,7 @@ class RuntimeConfigTest(unittest.TestCase):
     def test_default_configuration_has_a_versioned_source(self) -> None:
         settings = load_runtime_settings()
 
-        self.assertEqual(settings.rule_version, "2026-07-16.1")
+        self.assertEqual(settings.rule_version, "2026-07-17.2")
         self.assertEqual(settings.source, str(DEFAULT_CONFIG_PATH.resolve()))
         self.assertEqual(settings.get("runtime", "local_server", "host"), "0.0.0.0")
         self.assertEqual(settings.get("runtime", "local_server", "port"), 8000)
@@ -72,6 +72,19 @@ class RuntimeConfigTest(unittest.TestCase):
             clear_runtime_settings_cache()
 
             with self.assertRaises(RuntimeError):
+                load_runtime_settings()
+
+    def test_llm_continuation_limits_must_be_valid(self) -> None:
+        config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        config["runtime"]["llm_request"]["max_continuations"] = -1
+
+        with tempfile.TemporaryDirectory() as directory:
+            override_path = Path(directory) / "invalid-llm-continuation.json"
+            override_path.write_text(json.dumps(config), encoding="utf-8")
+            os.environ["TRADINGOS_CONFIG_PATH"] = str(override_path)
+            clear_runtime_settings_cache()
+
+            with self.assertRaisesRegex(RuntimeError, "continuation limits"):
                 load_runtime_settings()
 
     def test_board_ladder_configuration_must_cover_every_consecutive_board(self) -> None:

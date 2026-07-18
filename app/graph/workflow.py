@@ -38,6 +38,8 @@ from app.skills.main_force_behavior import identify_main_force_behavior
 from app.skills.market_strategy_gate import select_market_eligible_playbooks
 from app.skills.market_temperature import assess_market_temperature
 from app.skills.money_making_effect import assess_money_making_effect
+from app.skills.next_session_scenario import analyze_next_session_scenario
+from app.skills.price_observation_zones import analyze_price_observation_zones
 from app.skills.profile_alignment import assess_profile_alignment
 from app.skills.risk_scanner import scan_a_share_risks
 from app.skills.sentiment_cycle import identify_sentiment_cycle
@@ -177,6 +179,8 @@ class AShareResearchWorkflow:
             analyze_tiered_money_flow(state.money_flow),
             analyze_capital_flow_continuity(state.prices, state.capital_flow_history),
             analyze_turnover_continuity(state.prices),
+            analyze_next_session_scenario(state.prices, state.data_readiness),
+            analyze_price_observation_zones(state.prices, state.fundamentals, state.data_readiness),
             analyze_ah_premium(state.ah_premium, state.data_quality_reports) if state.ah_premium else None,
             analyze_intraday_snapshot(state.intraday) if state.intraday else None,
             assess_listing_stage(state.profile, state.analysis_date) if state.profile.list_date else None,

@@ -19,7 +19,7 @@ from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
 from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
-from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
@@ -66,7 +66,12 @@ class ResearchWebApp:
         )
 
     def health(self) -> dict[str, Any]:
-        return {"status": "ok", "mode": "local", "data_provider": type(self.workflow.provider).__name__}
+        return {
+            "status": "ok",
+            "mode": "local",
+            "data_provider": type(self.workflow.provider).__name__,
+            "realtime_ticker": load_runtime_settings().get("runtime", "realtime_ticker"),
+        }
 
     def profile(self) -> dict[str, Any]:
         return self.memory_store.load_profile().to_dict()
@@ -186,6 +191,42 @@ class ResearchWebApp:
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
             "source": source,
+        }
+
+    def refresh_ticker(self) -> dict[str, Any]:
+        """Refresh only prices for tracked symbols; full snapshots remain user-triggered."""
+        watchlist = self.memory_store.load_watchlist()
+        portfolio = self.memory_store.load_portfolio()
+        symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
+        maximum = int(load_runtime_settings().get("runtime", "realtime_ticker", "maximum_symbols"))
+        unique_symbols = list(dict.fromkeys(symbols))[:maximum]
+        quotes: dict[str, RealtimeQuote] = {}
+        fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
+        if callable(fetch_quotes):
+            quotes.update(fetch_quotes(unique_symbols))
+        missing_symbols = [
+            symbol for symbol in unique_symbols
+            if symbol not in quotes or quotes[symbol].data_status == "unavailable" or quotes[symbol].price is None
+        ]
+        if missing_symbols:
+            quotes.update(self.quote_client.fetch_quotes(missing_symbols))
+        available_sources = list(dict.fromkeys(
+            quote.source
+            for quote in quotes.values()
+            if quote.data_status != "unavailable" and quote.price is not None
+        ))
+        ticker_config = load_runtime_settings().get("runtime", "realtime_ticker")
+        live_session = any(
+            quote.data_status == "real_time" and quote.price is not None
+            for quote in quotes.values()
+        )
+        return {
+            "quotes": {symbol: quote.to_dict() for symbol, quote in quotes.items()},
+            "portfolio": build_portfolio_snapshot(portfolio, quotes),
+            "source": "+".join(available_sources) if available_sources else "unavailable",
+            "tracked_count": len(unique_symbols),
+            "refresh_interval_ms": ticker_config["refresh_interval_ms"] if live_session else ticker_config["non_realtime_interval_ms"],
+            "live_session": live_session,
         }
 
     def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -430,6 +471,8 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
                 self._write_json(HTTPStatus.OK, self.app.remove_position(payload))
             elif self.path == "/api/market/refresh":
                 self._write_json(HTTPStatus.OK, self.app.refresh_market())
+            elif self.path == "/api/market/ticker":
+                self._write_json(HTTPStatus.OK, self.app.refresh_ticker())
             elif self.path == "/api/morning/radar":
                 self._write_json(HTTPStatus.OK, self.app.morning_radar(payload))
             elif self.path == "/api/opportunities/scan":

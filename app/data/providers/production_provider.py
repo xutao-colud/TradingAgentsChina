@@ -170,9 +170,10 @@ class ProductionMarketDataProvider(MarketDataProvider):
 
     def get_industry_context(self, symbol: str, analysis_date: str) -> IndustryContext:
         if self.tushare.configured:
-            return self.tushare.get_industry_context(symbol, analysis_date)
-        profile = self.get_stock_profile(symbol)
-        return IndustryContext("unavailable", profile.industry, analysis_date, unavailable_reasons=["Tushare 未配置，行业景气数据不可用。"])
+            context = self.tushare.get_industry_context(symbol, analysis_date)
+            if context.data_status == "verified":
+                return context
+        return self.public_fallback.get_industry_context(symbol, analysis_date)
 
     def get_industry_flow_ranking(
         self,
@@ -242,7 +243,39 @@ class ProductionMarketDataProvider(MarketDataProvider):
         )
 
     def get_capital_flow_history(self, symbol: str, analysis_date: str) -> list[CapitalFlowObservation]:
-        return self.tushare.get_capital_flow_history(symbol, analysis_date) if self.tushare.configured else []
+        normalized = _normalized(symbol)
+        history = self.tushare.get_capital_flow_history(normalized, analysis_date) if self.tushare.configured else []
+        if history:
+            return history
+        cached = self.verified_cache.load_prefix(
+            "money_flow",
+            f"{normalized}-",
+            lambda row: MoneyFlowSnapshot(**row),
+        )
+        by_date: dict[str, tuple[MoneyFlowSnapshot, dict[str, str]]] = {}
+        for snapshot, metadata in cached:
+            observed_at = snapshot.as_of or metadata.get("as_of")
+            if observed_at and observed_at <= analysis_date and snapshot.main_net_inflow is not None:
+                by_date[observed_at] = (snapshot, metadata)
+        maximum = int(load_runtime_settings().get("providers", "tushare", "capital_flow_history", "history_points"))
+        selected = sorted(by_date.items())[-maximum:]
+        if selected:
+            latest_date = selected[-1][0]
+            self._append_evidence(normalized, analysis_date, EvidenceSource(
+                "flow-history-cache-001",
+                f"{normalized} 已核验资金流历史快照",
+                "verified_cache:money_flow_history",
+                latest_date,
+                snapshot_ids=[metadata["sha256"] for _, (_, metadata) in selected],
+            ))
+        return [
+            CapitalFlowObservation(
+                trade_date=trade_date,
+                main_net_inflow=snapshot.main_net_inflow,
+                source_ids=["flow-history-cache-001"],
+            )
+            for trade_date, (snapshot, _) in selected
+        ]
 
     def get_dragon_tiger_history(self, symbol: str, analysis_date: str) -> list[DragonTigerSeatRecord]:
         return self.tushare.get_dragon_tiger_history(symbol, analysis_date) if self.tushare.configured else []
@@ -301,9 +334,17 @@ class ProductionMarketDataProvider(MarketDataProvider):
 
     def get_intraday_snapshot(self, symbol: str, analysis_date: str) -> IntradaySnapshot:
         snapshot = self.akshare.get_intraday_snapshot(symbol, analysis_date)
+        if snapshot.data_status == "unavailable":
+            snapshot = self.public_fallback.get_intraday_snapshot(symbol, analysis_date)
         if snapshot.data_status != "unavailable":
             for source_id in snapshot.source_ids:
-                source_type = "akshare_stock_zh_a_hist_min_em" if "bars" in source_id else "akshare_stock_bid_ask_em"
+                source_type = (
+                    "sina_intraday_trades"
+                    if "sina" in source_id
+                    else "akshare_stock_zh_a_hist_min_em"
+                    if "bars" in source_id
+                    else "akshare_stock_bid_ask_em"
+                )
                 self._append_evidence(symbol, analysis_date, EvidenceSource(source_id, f"{symbol} intraday observation", source_type, snapshot.as_of))
         return snapshot
 

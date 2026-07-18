@@ -3,9 +3,10 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from app.data.provider_health import ProviderCircuitBreaker
-from app.data.providers.production_provider import _fundamental_cache_complete, _usable_flow
+from app.data.providers.production_provider import ProductionMarketDataProvider, _fundamental_cache_complete, _usable_flow
 from app.data.verified_cache import VerifiedDatasetCache
 from app.schemas.report import DailyPrice, FundamentalSnapshot, MoneyFlowSnapshot
 
@@ -63,6 +64,29 @@ class ProviderHighAvailabilityTest(unittest.TestCase):
         )
         self.assertTrue(_usable_flow(flow))
         self.assertIsNone(flow.main_net_inflow)
+
+    def test_verified_money_flow_cache_is_replayed_as_capital_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = VerifiedDatasetCache(directory)
+            for trade_date, amount in (("2026-07-16", 10_000_000), ("2026-07-17", -3_000_000)):
+                cache.save(
+                    "money_flow",
+                    f"000725.SZ-{trade_date}",
+                    MoneyFlowSnapshot(amount, None, None, "数据不足", None, "数据不足", as_of=trade_date),
+                    source_type="test_verified_flow",
+                    as_of=trade_date,
+                )
+            provider = ProductionMarketDataProvider(
+                tushare=SimpleNamespace(configured=False),
+                akshare=SimpleNamespace(),
+                public_fallback=SimpleNamespace(),
+                verified_cache=cache,
+            )
+
+            history = provider.get_capital_flow_history("000725.SZ", "2026-07-17")
+
+            self.assertEqual([item.trade_date for item in history], ["2026-07-16", "2026-07-17"])
+            self.assertEqual([item.main_net_inflow for item in history], [10_000_000, -3_000_000])
 
 
 if __name__ == "__main__":

@@ -103,6 +103,65 @@ class EastmoneyStockSnapshotClient:
             snapshots = list(executor.map(self.fetch_snapshot, unique_symbols))
         return dict(zip(unique_symbols, snapshots))
 
+    def fetch_quotes(self, symbols: list[str]) -> dict[str, RealtimeQuote]:
+        """Fetch quote fields only, avoiding the money-flow request used by full refreshes."""
+        normalized = [normalize_symbol(symbol) for symbol in symbols]
+        unique_symbols = list(dict.fromkeys(normalized))
+        if not unique_symbols:
+            return {}
+        workers = min(load_runtime_settings().get("runtime", "snapshot_max_workers"), len(unique_symbols))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="stock-quote") as executor:
+            quotes = list(executor.map(self.fetch_quote, unique_symbols))
+        return dict(zip(unique_symbols, quotes))
+
+    def fetch_quote(self, symbol: str) -> RealtimeQuote:
+        normalized = normalize_symbol(symbol)
+        now = self._now()
+        try:
+            quote_raw, quote_source = self._request_text(_quote_url(normalized), "stock_url", "stock_fallback_urls")
+            quote_payload = _load_json(quote_raw)
+            quote_data = quote_payload.get("data")
+            if not isinstance(quote_data, dict):
+                raise ValueError(f"No quote data returned for {normalized}")
+            force_latest = "eastmoney_push2delay" in quote_source
+            snapshot = _snapshot_from_data(
+                normalized,
+                quote_data,
+                None,
+                now,
+                source=quote_source,
+                force_latest_available=force_latest,
+            )
+            return RealtimeQuote(
+                symbol=normalized,
+                name=snapshot.name,
+                price=snapshot.price,
+                previous_close=snapshot.previous_close,
+                change_pct=snapshot.change_pct,
+                volume=snapshot.volume,
+                amount=snapshot.amount,
+                trade_date=now.date().isoformat(),
+                trade_time=now.time().isoformat(timespec="seconds"),
+                source=quote_source,
+                data_status=snapshot.data_status,
+            )
+        except (OSError, URLError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            unavailable = _unavailable_snapshot(normalized, str(exc), now)
+            return RealtimeQuote(
+                symbol=normalized,
+                name=None,
+                price=None,
+                previous_close=None,
+                change_pct=None,
+                volume=None,
+                amount=None,
+                trade_date=None,
+                trade_time=None,
+                source=unavailable.source,
+                data_status="unavailable",
+                error=unavailable.error,
+            )
+
     def fetch_snapshot(self, symbol: str) -> StockRealtimeSnapshot:
         normalized = normalize_symbol(symbol)
         now = self._now()

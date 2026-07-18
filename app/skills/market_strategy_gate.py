@@ -41,7 +41,8 @@ def select_market_eligible_playbooks(insights: list[SkillInsight]) -> SkillInsig
     ]
     risks: list[str] = ["该门槛只决定研究路线是否适配；个股仍须通过证据链、风险和交易规则审查。"]
 
-    if sentiment_stage == "数据不足":
+    sentiment_incomplete = bool(sentiment and sentiment.details.get("coverage_status") in {"partial", "insufficient"})
+    if sentiment_stage == "数据不足" or sentiment_incomplete:
         allowed = list(config["sentiment_unavailable_allowed_playbooks"])
         excluded = list(config["sentiment_unavailable_excluded_playbooks"])
         stage = "情绪历史不足·防守研究"

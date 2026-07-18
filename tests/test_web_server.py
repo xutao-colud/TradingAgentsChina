@@ -9,6 +9,7 @@ from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
+from app.llm.prompt_contracts import EXPLANATION_COMPLETE_MARKER
 from app.graph.workflow import build_sample_workflow
 from app.web.server import ResearchWebApp, _is_local_machine_address, _is_loopback_address
 
@@ -65,7 +66,13 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(result["data_status"], "样例数据")
             self.assertEqual(result["user_question"], "是否符合我的趋势回踩打法？")
             committee = next(item for item in result["skill_insights"] if item["category"] == "committee")
+            scenario = next(item for item in result["skill_insights"] if item["details"].get("mode") == "next_session_scenario")
+            zones = next(item for item in result["skill_insights"] if item["details"].get("mode") == "price_observation_zones")
             self.assertEqual(committee["details"]["judge"]["discussion_topic"], "是否符合我的趋势回踩打法？")
+            self.assertTrue(scenario["details"]["observational_only"])
+            self.assertFalse(scenario["details"]["admitted"])
+            self.assertTrue(zones["details"]["observational_only"])
+            self.assertFalse(zones["details"]["admitted"])
             self.assertIn("memory_event_id", result)
             context = app.memory_store.build_context("600519.SH")
             self.assertEqual(context["recent_same_symbol_interactions"][0]["question"], "是否符合我的趋势回踩打法？")
@@ -101,6 +108,33 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(market["portfolio"]["cash_balance"], 5000.0)
             app.remove_position({"symbol": "600519"})
             self.assertEqual(app.portfolio()["position_count"], 0)
+
+    def test_lightweight_ticker_refreshes_quotes_without_full_snapshot_flow(self) -> None:
+        quote_payload = '{"data":{"f43":607,"f47":1000,"f48":607000,"f57":"000725","f58":"京东方A","f60":600,"f170":117}}'
+        requested_urls: list[str] = []
+
+        def fetch_text(url: str) -> str:
+            requested_urls.append(url)
+            return quote_payload
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                stock_snapshot_client=EastmoneyStockSnapshotClient(
+                    fetch_text=fetch_text,
+                    now=lambda: datetime(2026, 7, 17, 10, 0, 0),
+                ),
+            )
+            app.add_watchlist({"symbol": "000725"})
+            app.upsert_position({"symbol": "000725", "quantity": 100, "cost_price": 5.8})
+            result = app.refresh_ticker()
+
+            self.assertEqual(result["tracked_count"], 1)
+            self.assertEqual(result["quotes"]["000725.SZ"]["price"], 6.07)
+            self.assertEqual(result["portfolio"]["positions"][0]["market_value"], 607.0)
+            self.assertEqual(result["refresh_interval_ms"], 3000)
+            self.assertEqual(len(requested_urls), 1)
+            self.assertNotIn("fflow", requested_urls[0])
 
     def test_dashboard_watchlist_returns_sector_and_money_flow_snapshot(self) -> None:
         quote_payload = '{"data":{"f43":759,"f44":834,"f45":759,"f46":816,"f47":38046199,"f48":30277260673.71,"f57":"000725","f58":"京东方Ａ","f60":815,"f116":281166450005.76,"f117":268436547948.03,"f127":"光学光电子","f128":"北京板块","f129":"物联网,OLED,人工智能","f168":1076,"f170":-687}}'
@@ -154,7 +188,10 @@ class ResearchWebAppTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             def fake_post(url, headers, payload):
                 self.assertEqual(payload["model"], "qwen-plus")
-                return {"choices": [{"message": {"content": "通义千问解释。"}}]}
+                return {"choices": [{
+                    "message": {"content": f"通义千问解释。\n{EXPLANATION_COMPLETE_MARKER}"},
+                    "finish_reason": "stop",
+                }]}
 
             runtime = ModelRuntime(f"{tmpdir}/model_settings.json", post_json=fake_post)
             runtime.configure("qwen", "session-secret-key", "qwen-plus")

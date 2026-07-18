@@ -60,6 +60,7 @@
       <section class="market-board">
         <article class="watch-card">
           <div class="section-heading"><span>00</span><h2>盘中自选</h2><button id="refreshMarket" type="button" class="quiet-button">刷新实时行情 ↻</button></div>
+          <div id="tickerStatus" class="ticker-status"><i aria-hidden="true"></i><span>自动报价待启动</span></div>
           <form id="watchlistForm" class="inline-form">
             <label>股票代码<input id="watchSymbol" placeholder="600519" maxlength="9"></label>
             <label class="watch-note">观察备注<input id="watchNote" placeholder="例如：等待回踩确认"></label>
@@ -96,6 +97,7 @@
           <div id="reportContent" hidden>
             <div class="report-top"><div><p class="eyebrow" id="reportSymbol"></p><h3 id="reportTitle"></h3><p id="realtimeReport" class="realtime-report"></p></div><div class="verdict" id="verdict"></div></div>
             <div class="scores" id="scores"></div>
+            <section id="scenarioPanel" class="scenario-panel" aria-label="次日情景与多周期价格观察" hidden></section>
             <div class="narrative"><h4>行动框架</h4><p id="actionPlan"></p><h4>关键风险</h4><ul id="risks"></ul></div>
             <button id="committeeButton" type="button" class="court-button" hidden>查看投资流派法庭</button>
             <div class="skills-wrap"><h4>领域 Skills</h4><div id="skills"></div></div>

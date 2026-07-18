@@ -50,16 +50,29 @@ class _PublicClient:
 
 
 class _SinaTickFallbackClient(_PublicClient):
+    def __init__(self):
+        self.tick_calls = 0
+
     def stock_fund_flow_individual(self, **kwargs):
         # THS free rankings can legitimately omit a requested stock.
         return _Frame([{"��Ʊ����": 600000, "����": "1��"}])
 
     def stock_intraday_sina(self, **kwargs):
+        self.tick_calls += 1
         return _Frame([
             {"ticktime": "09:25:00", "price": 6.25, "volume": 1_000_000, "prev_price": 0, "kind": "U"},
             {"ticktime": "09:30:03", "price": 6.28, "volume": 100_000, "prev_price": 6.27, "kind": "U"},
             {"ticktime": "09:30:06", "price": 6.21, "volume": 50_000, "prev_price": 6.28, "kind": "D"},
             {"ticktime": "09:30:09", "price": 6.22, "volume": 20_000, "prev_price": 6.21, "kind": "E"},
+        ])
+
+
+class _SinaIntradayClient(_SinaTickFallbackClient):
+    def stock_intraday_sina(self, **kwargs):
+        self.tick_calls += 1
+        return _Frame([
+            {"ticktime": f"09:{minute:02d}:03", "price": 6.20 + index * 0.01, "volume": 10_000, "prev_price": 6.20, "kind": "U"}
+            for index, minute in enumerate((30, 35, 40, 45, 50, 55))
         ])
 
 
@@ -72,6 +85,28 @@ class _TransientFlowClient(_PublicClient):
         if self.calls == 1:
             return _Frame([])
         return super().stock_fund_flow_individual(**kwargs)
+
+
+class _IndustryClient(_PublicClient):
+    def stock_industry_change_cninfo(self, **kwargs):
+        return _Frame([
+            {
+                "新证券简称": "京东方A",
+                "行业中类": "面板",
+                "行业大类": "光学光电子",
+                "行业次类": "电子",
+                "行业门类": "信息技术",
+                "分类标准编码": "008014",
+                "变更日期": "2021-12-17",
+            }
+        ])
+
+    def stock_fund_flow_industry(self, **kwargs):
+        return _Frame([
+            {"行业": "通信", "净额": 43.92, "行业-涨跌幅": 0.4, "公司家数": 84},
+            {"行业": "光学光电子", "净额": -15.86, "行业-涨跌幅": -6.43, "公司家数": 107},
+            {"行业": "消费电子", "净额": -32.25, "行业-涨跌幅": -7.34, "公司家数": 97},
+        ])
 
 
 def _fetch(url: str) -> str:
@@ -168,6 +203,35 @@ class PublicFallbackMarketDataProviderTest(unittest.TestCase):
         self.assertIsNone(first.main_net_inflow)
         self.assertEqual(second.main_net_inflow, 300_000_000)
         self.assertEqual(client.calls, 2)
+
+    def test_sina_ticks_are_reused_for_money_flow_and_intraday_bars(self):
+        client = _SinaIntradayClient()
+        provider = PublicFallbackMarketDataProvider(
+            client=client, fetch_text=_fetch, today=lambda: date(2026, 7, 16)
+        )
+
+        flow = provider.get_money_flow("000725.SZ", "2026-07-16")
+        snapshot = provider.get_intraday_snapshot("000725.SZ", "2026-07-16")
+
+        self.assertEqual(client.tick_calls, 1)
+        self.assertIsNotNone(flow.trade_direction_net_inflow)
+        self.assertEqual(snapshot.data_status, "verified")
+        self.assertEqual(len(snapshot.bars), 6)
+        self.assertEqual(snapshot.source_ids, ["intraday-bars-sina-001"])
+
+    def test_cninfo_classification_exactly_matches_public_industry_flow(self):
+        provider = PublicFallbackMarketDataProvider(
+            client=_IndustryClient(), fetch_text=_fetch, today=lambda: date(2026, 7, 17)
+        )
+
+        profile = provider.get_stock_profile("000725.SZ")
+        context = provider.get_industry_context("000725.SZ", "2026-07-17")
+
+        self.assertEqual(profile.industry, "光学光电子")
+        self.assertEqual(context.data_status, "verified")
+        target = next(item for item in context.flow_observations if item.industry == "光学光电子")
+        self.assertEqual(target.net_amount, -1_586_000_000)
+        self.assertEqual(context.source_ids, ["profile-001", "industry-flow-001"])
 
 
 if __name__ == "__main__":
