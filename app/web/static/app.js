@@ -154,6 +154,7 @@ function money(value) { return value == null ? "—" : new Intl.NumberFormat("zh
 function percentage(value) { return value == null ? "—" : `${value >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`; }
 function yi(value) { return value == null ? "—" : `${(Number(value) / 100000000).toFixed(2)}亿`; }
 function shares(value) { return value == null ? "—" : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value); }
+function quoteStatusLabel(status) { return status === "real_time" ? "实时" : status === "latest_available" ? "当日最新/收盘" : "不可用"; }
 
 function watchRow(item, openDetail = false) {
   const row = document.createElement("div"); row.className = "watch-row";
@@ -165,7 +166,7 @@ function watchRow(item, openDetail = false) {
   const quote = item.quote;
   if (!snapshot?.name && quote?.name) text(symbol, `${item.symbol} · ${quote.name}`);
   const price = document.createElement("b"); const meta = document.createElement("small");
-  if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quote.data_status} · ${quote.trade_date || ""}`); }
+  if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quoteStatusLabel(quote.data_status)} · ${quote.trade_date || ""}`); }
   else { text(price, "行情不可用"); price.className = "flat"; text(meta, quote?.error || "请刷新后重试"); }
   const advice = document.createElement("p"); text(advice, item.advice || "点击刷新实时行情以获取研究提示。");
   initializeRollingPrice(price, quote);
@@ -330,7 +331,12 @@ async function refreshTicker() {
     state.tickerTrackedCount = Number(data.tracked_count || 0);
     if (state.tickerTrackedCount < 1) { setTickerStatus("加入自选或持仓后自动报价", "paused"); return; }
     updateTrackedQuotes(data.quotes || {}); updatePortfolioTicker(data.portfolio);
-    setTickerStatus(data.source === "unavailable" ? "报价源暂不可用，自动重试" : `${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒自动报价 · ${data.source}`, data.source === "unavailable" ? "error" : "live");
+    const tickerMessage = data.source === "unavailable"
+      ? "实时源暂不可用，未使用历史收盘价冒充当前价；正在自动重试"
+      : data.live_session
+        ? `${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒实时更新 · ${data.source}`
+        : `当日最新/收盘价 · ${data.source} · ${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒校验`;
+    setTickerStatus(tickerMessage, data.source === "unavailable" ? "error" : data.live_session ? "live" : "paused");
     scheduleTicker(data.source === "unavailable" ? state.tickerConfig.error_backoff_ms : data.refresh_interval_ms);
   } catch (error) {
     setTickerStatus(`自动报价失败：${error.message}`, "error"); scheduleTicker(state.tickerConfig.error_backoff_ms);
@@ -344,7 +350,7 @@ function updateTrackedQuotes(quotes) {
     animateRollingPrice(row.querySelector(".watch-live-price"), quote);
     const name = row.querySelector("div > strong"); if (name && quote.name) text(name, `${symbol} · ${quote.name}`);
     const meta = row.querySelector('[data-role="quote-meta"]');
-    if (meta) text(meta, `${percentage(quote.change_pct)} · ${quote.data_status || "未知"} · ${quote.trade_date || ""} ${quote.trade_time || ""}`);
+    if (meta) text(meta, `${percentage(quote.change_pct)} · ${quoteStatusLabel(quote.data_status)} · ${quote.trade_date || ""} ${quote.trade_time || ""}`);
   });
 }
 
@@ -443,6 +449,7 @@ function renderReport(report) {
   text($("verdict"), report.conclusion); $("verdict").dataset.risk = report.risk_level;
   const scores = $("scores"); scores.replaceChildren();
   [["基本", report.fundamental_score], ["技术", report.technical_score], ["资金", report.capital_flow_score], ["题材", report.theme_score]].forEach(([label, value]) => scores.append(scoreTile(label, value)));
+  renderDecisionBrief(report.decision_brief);
   text($("actionPlan"), report.action_plan);
   const risks = $("risks"); risks.replaceChildren(); (report.risk_factors || []).slice(0, 4).forEach((risk) => { const li = document.createElement("li"); text(li, risk); risks.append(li); });
   const skills = $("skills"); skills.replaceChildren(); (report.skill_insights || []).filter((skill) => !["next_session_scenario", "price_observation_zones"].includes(skill.details?.mode)).forEach((skill) => {
@@ -464,6 +471,82 @@ function renderReport(report) {
   const execution = report.model_execution;
   text($("modelInterpretationTitle"), execution ? `${execution.provider_name} · ${execution.model} 解释` : "模型解释");
   text($("modelInterpretation"), report.model_interpretation);
+}
+
+function renderDecisionBrief(brief) {
+  const root = $("decisionBrief");
+  root.replaceChildren();
+  root.hidden = !brief || typeof brief !== "object";
+  if (root.hidden) return;
+
+  const boundary = brief.data_boundary || {};
+  const head = document.createElement("div"); head.className = "evidence-brief__head";
+  const heading = document.createElement("div");
+  const eyebrow = document.createElement("span"); eyebrow.className = "evidence-brief__eyebrow"; text(eyebrow, "EVIDENCE BRIEF");
+  const title = document.createElement("h4"); text(title, brief.headline || "证据裁决简报");
+  const thesis = document.createElement("p"); text(thesis, brief.thesis || "暂无论据摘要。");
+  heading.append(eyebrow, title, thesis);
+  const badge = document.createElement("b"); badge.className = "evidence-brief__badge";
+  text(badge, `${boundary.status || "数据未知"} · ${boundary.traceable_finding_count ?? 0}/${boundary.total_finding_count ?? 0} 可追溯`);
+  head.append(heading, badge); root.append(head);
+
+  const evidenceGrid = document.createElement("div"); evidenceGrid.className = "evidence-claim-grid";
+  const claims = Array.isArray(brief.decisive_evidence) ? brief.decisive_evidence : [];
+  if (!claims.length) evidenceGrid.append(evidenceBriefEmpty("没有具备来源和时间的决定性证据。"));
+  claims.forEach((claim, index) => evidenceGrid.append(renderEvidenceClaim(claim, index)));
+  root.append(evidenceGrid);
+
+  const challengeGrid = document.createElement("div"); challengeGrid.className = "evidence-challenge-grid";
+  challengeGrid.append(
+    evidenceBriefList("最强反证", (brief.strongest_counter_evidence || []).map((item) => `${item.domain}：${item.claim}${item.why_it_matters ? `；${item.why_it_matters}` : ""}`), "暂无可追溯反证。"),
+    evidenceBriefList("失效条件", brief.invalidation_conditions || [], "尚未形成可观察失效条件。"),
+  );
+  root.append(challengeGrid);
+
+  const court = brief.court || {};
+  const profile = brief.profile_fit || {};
+  const synthesis = document.createElement("div"); synthesis.className = "evidence-synthesis";
+  const courtTitle = document.createElement("strong"); text(courtTitle, court.status === "decided" ? `${court.winner || "当前路线"}领先` : "委员会未形成路线优势");
+  const courtMeta = document.createElement("span");
+  text(courtMeta, court.status === "decided" ? `${court.runner_up || "第二路线未知"} · 领先 ${court.score_gap ?? "—"} 分 · ${court.reliability || "可靠性未标注"}` : court.verdict || "证据门禁拒绝比较。");
+  const courtText = document.createElement("p"); text(courtText, court.action || court.verdict || "等待补齐证据。");
+  const profileText = document.createElement("p"); profileText.className = "profile-fit-line"; text(profileText, `画像适配：${profile.conclusion || "未取得用户画像适配结论"}`);
+  synthesis.append(courtTitle, courtMeta, courtText, profileText); root.append(synthesis);
+
+  const gaps = brief.critical_data_gaps || [];
+  if (gaps.length) {
+    const gapPanel = document.createElement("details"); gapPanel.className = "evidence-gaps";
+    const summary = document.createElement("summary"); text(summary, `关键数据缺口 · ${gaps.length} 项（已去重）`);
+    const list = document.createElement("ul");
+    gaps.forEach((gap) => { const li = document.createElement("li"); text(li, `${gap.dataset} · ${gap.status}${gap.as_of ? ` · ${gap.as_of}` : ""}：${gap.reason}`); list.append(li); });
+    gapPanel.append(summary, list); root.append(gapPanel);
+  }
+}
+
+function renderEvidenceClaim(claim, index) {
+  const card = document.createElement("article"); card.className = `evidence-claim ${claim.direction === "约束" ? "is-caution" : "is-support"}`;
+  const meta = document.createElement("span"); text(meta, `0${index + 1} · ${claim.domain || "未知维度"} · ${claim.direction || "观察"}`);
+  const title = document.createElement("strong"); text(title, claim.claim || "未形成结论");
+  const score = document.createElement("b"); text(score, `${claim.score ?? "—"} 分 · 置信 ${formatConfidence(claim.confidence)}`);
+  const observations = document.createElement("ul");
+  (claim.observations || []).forEach((item) => { const li = document.createElement("li"); text(li, item); observations.append(li); });
+  const sources = document.createElement("p"); sources.className = "evidence-source-line";
+  text(sources, (claim.sources || []).map((source) => `${source.id}｜${source.as_of}｜${source.title}`).join("；") || "无可追溯来源");
+  card.append(meta, title, score, observations, sources); return card;
+}
+
+function evidenceBriefList(titleText, items, emptyText) {
+  const section = document.createElement("section"); const title = document.createElement("h5"); const list = document.createElement("ul");
+  text(title, titleText); (items.length ? items : [emptyText]).forEach((item) => { const li = document.createElement("li"); text(li, item); list.append(li); });
+  section.append(title, list); return section;
+}
+
+function evidenceBriefEmpty(message) {
+  const empty = document.createElement("p"); empty.className = "evidence-brief__empty"; text(empty, message); return empty;
+}
+
+function formatConfidence(value) {
+  const numeric = Number(value); return Number.isFinite(numeric) ? `${Math.round(numeric * 100)}%` : "—";
 }
 
 function renderScenarioPanel(report) {
@@ -636,7 +719,7 @@ function renderCommitteeCourt(details) {
   const root = $("committeeFactions");
   if (!judgeBox || !root) return;
   judgeBox.replaceChildren();
-  const title = document.createElement("strong"); text(title, `Judge 裁决：${judge.winner || "暂无优势"}`);
+  const title = document.createElement("strong"); text(title, `${judge.role_label || "主审判官"}裁决：${judge.winner || "暂无优势"}`);
   const topic = document.createElement("em"); text(topic, `研讨问题：${judge.discussion_topic || "当前个股是否值得继续研究"}`);
   const meta = document.createElement("span"); text(meta, `${judge.winner_route || "—"} · 可靠性 ${judge.reliability || "—"} · 领先 ${judge.score_gap ?? "—"} 分`);
   const method = document.createElement("span"); text(method, judge.score_summary ? `${judge.score_summary}｜${judge.score_method || ""}` : judge.score_method || "");

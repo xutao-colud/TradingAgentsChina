@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from app.market.realtime import SinaRealtimeQuoteClient
+from app.market.realtime import SinaRealtimeQuoteClient, TencentRealtimeQuoteClient
 
 
 def _line(identifier: str, name: str, previous: str, price: str, trade_date: str = "2026-07-13") -> str:
@@ -54,3 +54,36 @@ class SinaRealtimeQuoteClientTest(unittest.TestCase):
 
         self.assertEqual(calls, 2)
         self.assertEqual(quote.data_status, "real_time")
+
+
+class TencentRealtimeQuoteClientTest(unittest.TestCase):
+    def test_parses_current_batch_quote_with_provider_timestamp(self) -> None:
+        fields = [""] * 40
+        fields[0] = "51"
+        fields[1] = "京东方A"
+        fields[2] = "000725"
+        fields[3] = "5.79"
+        fields[4] = "6.07"
+        fields[6] = "26813210"
+        fields[30] = "20260720101530"
+        fields[32] = "-4.61"
+        fields[35] = "5.79/26813210/15825022216"
+        fields[37] = "1582502"
+        response = f'v_sz000725="{"~".join(fields)}";'
+        client = TencentRealtimeQuoteClient(
+            fetch_text=lambda url: response,
+            now=lambda: datetime(2026, 7, 20, 10, 16, 0),
+        )
+
+        quote = client.fetch_quotes(["000725"])["000725.SZ"]
+
+        self.assertEqual(quote.name, "京东方A")
+        self.assertEqual(quote.price, 5.79)
+        self.assertEqual(quote.previous_close, 6.07)
+        self.assertEqual(quote.change_pct, -4.61)
+        self.assertEqual(quote.volume, 26_813_210)
+        self.assertEqual(quote.amount, 15_825_022_216)
+        self.assertEqual(quote.trade_date, "2026-07-20")
+        self.assertEqual(quote.trade_time, "10:15:30")
+        self.assertEqual(quote.data_status, "real_time")
+        self.assertEqual(quote.source, "tencent")

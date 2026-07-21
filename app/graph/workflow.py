@@ -22,6 +22,7 @@ from app.playbooks.evaluator import assess_active_playbook
 from app.rules.trading_rules import invalid_conditions, normalize_symbol
 from app.rules.risk_facts import enrich_stock_profile_risks
 from app.rules.special_instruments import assess_listing_stage
+from app.reporting.evidence_brief import build_decision_brief
 from app.schemas.report import AnalysisReport, DataQualityReport, EvidenceSource
 from dataclasses import replace
 
@@ -234,7 +235,7 @@ class AShareResearchWorkflow:
         risk_level, risk_factors = assess_risk(state.findings, state.invalid_conditions, state.skill_insights)
         finding_by_agent = {item.agent: item for item in state.findings}
         settings = load_runtime_settings()
-        return AnalysisReport(
+        report = AnalysisReport(
             symbol=state.profile.symbol,
             name=state.profile.name,
             analysis_date=state.analysis_date,
@@ -264,6 +265,7 @@ class AShareResearchWorkflow:
             config_source=settings.source,
             analysis_level=analysis_level,
         )
+        return replace(report, decision_brief=build_decision_brief(report))
 
 
 def _finding_confidence_cap(

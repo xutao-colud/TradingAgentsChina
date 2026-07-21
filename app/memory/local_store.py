@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from app.memory.models import FeedbackEvent, MemoryEvent, TradingProfile
@@ -22,6 +23,7 @@ class LocalMemoryStore:
         self.portfolio_path = self.root / "portfolio.json"
         self.opportunity_pool_path = self.root / "opportunity_pool.json"
         self.opportunity_event_path = self.root / "opportunity_events.jsonl"
+        self._watchlist_lock = RLock()
 
     def ensure(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -62,30 +64,36 @@ class LocalMemoryStore:
         return updated
 
     def load_watchlist(self) -> list[dict[str, Any]]:
-        self.ensure()
-        if not self.watchlist_path.exists():
-            return []
-        data = json.loads(self.watchlist_path.read_text(encoding="utf-8"))
-        if not isinstance(data, list):
-            raise ValueError("Watchlist storage is invalid")
-        return data
+        with self._watchlist_lock:
+            self.ensure()
+            if not self.watchlist_path.exists():
+                return []
+            data = json.loads(self.watchlist_path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                raise ValueError("Watchlist storage is invalid")
+            normalized = _normalize_watchlist(data)
+            if normalized != data:
+                self._write_json_atomic(self.watchlist_path, normalized)
+            return normalized
 
     def add_watchlist(self, symbol: str, note: str | None = None) -> list[dict[str, Any]]:
         normalized = normalize_symbol(symbol)
-        items = self.load_watchlist()
-        existing = next((item for item in items if item.get("symbol") == normalized), None)
-        if existing is None:
-            items.append({"symbol": normalized, "note": (note or "").strip()[:120]})
-        elif note is not None:
-            existing["note"] = note.strip()[:120]
-        self._write_json(self.watchlist_path, items)
-        return items
+        with self._watchlist_lock:
+            items = self.load_watchlist()
+            existing = next((item for item in items if item.get("symbol") == normalized), None)
+            if existing is None:
+                items.append({"symbol": normalized, "note": (note or "").strip()[:120]})
+            elif note is not None:
+                existing["note"] = note.strip()[:120]
+            self._write_json_atomic(self.watchlist_path, items)
+            return items
 
     def remove_watchlist(self, symbol: str) -> list[dict[str, Any]]:
         normalized = normalize_symbol(symbol)
-        items = [item for item in self.load_watchlist() if item.get("symbol") != normalized]
-        self._write_json(self.watchlist_path, items)
-        return items
+        with self._watchlist_lock:
+            items = [item for item in self.load_watchlist() if item.get("symbol") != normalized]
+            self._write_json_atomic(self.watchlist_path, items)
+            return items
 
     def load_portfolio(self) -> dict[str, Any]:
         self.ensure()
@@ -534,6 +542,22 @@ class LocalMemoryStore:
                     version=profile.version + 1,
                 )
             )
+
+
+def _normalize_watchlist(data: list[Any]) -> list[dict[str, Any]]:
+    """Canonicalize legacy rows and collapse aliases to one persisted symbol."""
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for raw in data:
+        if not isinstance(raw, dict) or not isinstance(raw.get("symbol"), str):
+            raise ValueError("Watchlist storage contains an invalid item")
+        symbol = normalize_symbol(raw["symbol"])
+        note = str(raw.get("note") or "").strip()[:120]
+        existing = by_symbol.get(symbol)
+        if existing is None:
+            by_symbol[symbol] = {"symbol": symbol, "note": note}
+        elif note:
+            existing["note"] = note
+    return list(by_symbol.values())
 
 
 def _append_unique(items: list[str], value: str) -> bool:

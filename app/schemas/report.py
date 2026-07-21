@@ -428,6 +428,7 @@ class AnalysisReport:
     active_playbook: str | None = None
     user_question: str | None = None
     realtime_quote: dict[str, Any] | None = None
+    decision_brief: dict[str, Any] = field(default_factory=dict)
     model_interpretation: str | None = None
     model_execution: dict[str, Any] | None = None
     rule_version: str = "unknown"

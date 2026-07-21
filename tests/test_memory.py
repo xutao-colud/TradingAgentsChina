@@ -118,6 +118,23 @@ class LocalMemoryStoreTest(unittest.TestCase):
             self.assertEqual(target.load_portfolio()["cash_balance"], 10000.0)
             self.assertEqual(target.load_portfolio()["positions"][0]["quantity"], 100.0)
 
+    def test_watchlist_is_idempotent_and_repairs_legacy_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "watchlist.json"
+            path.write_text(
+                json.dumps([
+                    {"symbol": "000725", "note": ""},
+                    {"symbol": "000725.SZ", "note": "latest note"},
+                ]),
+                encoding="utf-8",
+            )
+            store = LocalMemoryStore(tmpdir)
+
+            self.assertEqual(store.load_watchlist(), [{"symbol": "000725.SZ", "note": "latest note"}])
+            self.assertEqual(len(store.add_watchlist("000725", "updated note")), 1)
+            self.assertEqual(store.load_watchlist()[0]["note"], "updated note")
+            self.assertEqual(len(json.loads(path.read_text(encoding="utf-8"))), 1)
+
     def test_outcome_feedback_adapts_to_consent_gated_strategy_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)

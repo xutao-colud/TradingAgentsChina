@@ -156,10 +156,11 @@ class MorningMoneyRadarClient:
         if not tracked:
             return None
         quotes = self._quote_fetcher(tracked)
+        now = self._now()
         available = [
             quote
             for quote in quotes.values()
-            if quote.data_status != "unavailable" and quote.price is not None and quote.change_pct is not None
+            if _usable_tracked_quote(quote, now)
         ]
         if not available:
             return None
@@ -181,10 +182,10 @@ class MorningMoneyRadarClient:
                 reverse=True,
             )[:limit]
         ]
-        now = self._now()
+        quote_sources = list(dict.fromkeys(quote.source for quote in available))
         return MorningRadarSnapshot(
             as_of=_latest_quote_as_of(available, now),
-            source="sina_tracked_universe",
+            source=f"tracked_universe:{'+'.join(quote_sources)}",
             data_status="tracked_universe",
             market_phase=_market_phase(now),
             top_inflow_sectors=[],
@@ -433,6 +434,20 @@ def _latest_quote_as_of(quotes: list[RealtimeQuote], fallback: datetime) -> str:
         except ValueError:
             continue
     return (max(timestamps) if timestamps else fallback).isoformat(timespec="seconds")
+
+
+def _usable_tracked_quote(quote: RealtimeQuote, now: datetime) -> bool:
+    """Reject stale cached quotes from the intraday radar evidence chain."""
+    has_required_fields = (
+        quote.data_status != "unavailable"
+        and quote.price is not None
+        and quote.price > 0
+        and quote.change_pct is not None
+    )
+    return has_required_fields and (
+        quote.data_status == "real_time"
+        or quote.trade_date == now.date().isoformat()
+    )
 
 
 def _market_phase(now: datetime) -> str:

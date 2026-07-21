@@ -4,6 +4,7 @@ import argparse
 import json
 import socket
 from dataclasses import replace
+from datetime import date
 from functools import lru_cache
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,11 +20,12 @@ from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
 from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
-from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
+from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient, TencentRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
 from app.portfolio.snapshot import build_portfolio_snapshot, quote_advice
+from app.reporting.presentation import public_report_payload
 from app.rules.trading_rules import normalize_symbol
 
 
@@ -46,17 +48,26 @@ class ResearchWebApp:
         morning_radar_client: MorningMoneyRadarClient | None = None,
         stock_snapshot_client: EastmoneyStockSnapshotClient | None = None,
         model_runtime: ModelRuntime | None = None,
+        quote_fallback_clients: list[Any] | None = None,
     ) -> None:
         self.memory_store = memory_store
         self.workflow = workflow or build_default_workflow()
         self.mcp_server = McpToolServer(provider=self.workflow.provider, memory_store=memory_store)
         self.quote_client = quote_client or SinaRealtimeQuoteClient()
+        self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
+        if quote_fallback_clients is not None:
+            self.quote_fallback_clients = quote_fallback_clients
+        elif quote_client is not None:
+            self.quote_fallback_clients = [quote_client]
+        else:
+            clients = {"tencent": TencentRealtimeQuoteClient(), "sina": self.quote_client}
+            order = load_runtime_settings().get("runtime", "realtime_ticker", "fallback_providers")
+            self.quote_fallback_clients = [clients[provider] for provider in order]
         sector_fallback = _build_sector_radar_fallback(self.workflow.provider)
         self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient(
-            quote_fetcher=self.quote_client.fetch_quotes,
+            quote_fetcher=self._fetch_current_quotes,
             secondary_fetcher=sector_fallback.fetch_snapshot if sector_fallback else None,
         )
-        self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
         self.model_runtime = model_runtime or ModelRuntime(memory_store.root / "model_settings.json")
         self.opportunity_pipeline = OpportunityPipeline(
             self.workflow,
@@ -151,14 +162,10 @@ class ResearchWebApp:
         symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
         unique_symbols = list(dict.fromkeys(symbols))
         snapshots = self.stock_snapshot_client.fetch_snapshots(unique_symbols) if self.stock_snapshot_client else {}
-        quotes = {
-            symbol: snapshot.to_quote()
-            for symbol, snapshot in snapshots.items()
-            if snapshot.data_status != "unavailable" and snapshot.price is not None
-        }
-        missing_quote_symbols = [symbol for symbol in unique_symbols if symbol not in quotes]
-        if missing_quote_symbols:
-            quotes.update(self.quote_client.fetch_quotes(missing_quote_symbols))
+        quotes = self._complete_quotes(
+            unique_symbols,
+            {symbol: snapshot.to_quote() for symbol, snapshot in snapshots.items()},
+        )
         watch_rows = [
             {
                 **item,
@@ -167,30 +174,14 @@ class ResearchWebApp:
                 "advice": quote_advice(quotes[item["symbol"]]),
             }
             for item in watchlist
-            if item["symbol"] in quotes
         ]
-        verified_eastmoney_symbols = {
-            symbol
-            for symbol, snapshot in snapshots.items()
-            if snapshot.data_status != "unavailable" and snapshot.price is not None
-        }
-        verified_eastmoney_sources = list(dict.fromkeys(
-            snapshot.source
-            for symbol, snapshot in snapshots.items()
-            if symbol in verified_eastmoney_symbols
+        available_sources = list(dict.fromkeys(
+            quote.source for quote in quotes.values() if _usable_current_quote(quote)
         ))
-        if verified_eastmoney_symbols and missing_quote_symbols:
-            source = "+".join([*verified_eastmoney_sources, "sina_fallback"])
-        elif verified_eastmoney_symbols:
-            source = "+".join(verified_eastmoney_sources)
-        elif quotes:
-            source = "sina"
-        else:
-            source = "unavailable"
         return {
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
-            "source": source,
+            "source": "+".join(available_sources) if available_sources else "unavailable",
         }
 
     def refresh_ticker(self) -> dict[str, Any]:
@@ -200,24 +191,19 @@ class ResearchWebApp:
         symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
         maximum = int(load_runtime_settings().get("runtime", "realtime_ticker", "maximum_symbols"))
         unique_symbols = list(dict.fromkeys(symbols))[:maximum]
-        quotes: dict[str, RealtimeQuote] = {}
+        primary_quotes: dict[str, RealtimeQuote] = {}
         fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
         if callable(fetch_quotes):
-            quotes.update(fetch_quotes(unique_symbols))
-        missing_symbols = [
-            symbol for symbol in unique_symbols
-            if symbol not in quotes or quotes[symbol].data_status == "unavailable" or quotes[symbol].price is None
-        ]
-        if missing_symbols:
-            quotes.update(self.quote_client.fetch_quotes(missing_symbols))
+            primary_quotes.update(fetch_quotes(unique_symbols))
+        quotes = self._complete_quotes(unique_symbols, primary_quotes)
         available_sources = list(dict.fromkeys(
             quote.source
             for quote in quotes.values()
-            if quote.data_status != "unavailable" and quote.price is not None
+            if _usable_current_quote(quote)
         ))
         ticker_config = load_runtime_settings().get("runtime", "realtime_ticker")
         live_session = any(
-            quote.data_status == "real_time" and quote.price is not None
+            quote.data_status == "real_time" and _usable_current_quote(quote)
             for quote in quotes.values()
         )
         return {
@@ -228,6 +214,47 @@ class ResearchWebApp:
             "refresh_interval_ms": ticker_config["refresh_interval_ms"] if live_session else ticker_config["non_realtime_interval_ms"],
             "live_session": live_session,
         }
+
+    def _complete_quotes(
+        self,
+        symbols: list[str],
+        primary_quotes: dict[str, RealtimeQuote],
+    ) -> dict[str, RealtimeQuote]:
+        """Complete tracked quotes without ever dropping a persisted symbol."""
+        quotes = {
+            symbol: quote
+            for symbol, quote in primary_quotes.items()
+            if symbol in symbols and _usable_current_quote(quote)
+        }
+        for client in self.quote_fallback_clients:
+            missing = [symbol for symbol in symbols if symbol not in quotes]
+            if not missing:
+                break
+            try:
+                secondary = client.fetch_quotes(missing)
+            except (OSError, RuntimeError, ValueError):
+                secondary = {}
+            quotes.update({
+                symbol: quote
+                for symbol, quote in secondary.items()
+                if symbol in missing and _usable_current_quote(quote)
+            })
+        for symbol in symbols:
+            if symbol not in quotes:
+                quotes[symbol] = _unavailable_realtime_quote(symbol)
+        return quotes
+
+    def _fetch_current_quotes(self, symbols: list[str]) -> dict[str, RealtimeQuote]:
+        """Use the same verified failover chain for ticker and radar fallbacks."""
+        normalized = list(dict.fromkeys(normalize_symbol(symbol) for symbol in symbols))
+        primary_quotes: dict[str, RealtimeQuote] = {}
+        fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
+        if callable(fetch_quotes):
+            try:
+                primary_quotes.update(fetch_quotes(normalized))
+            except (OSError, RuntimeError, ValueError):
+                primary_quotes = {}
+        return self._complete_quotes(normalized, primary_quotes)
 
     def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
@@ -339,22 +366,13 @@ class ResearchWebApp:
         quote = None
         if payload.get("include_realtime") is True:
             try:
+                primary_quotes: dict[str, RealtimeQuote] = {}
                 if self.stock_snapshot_client:
                     snapshot = self.stock_snapshot_client.fetch_snapshot(symbol)
-                    quote = snapshot.to_quote() if snapshot.data_status != "unavailable" and snapshot.price is not None else None
-                    if quote is None:
-                        quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
-                else:
-                    quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
-                realtime_quote = (
-                    quote.to_dict()
-                    if quote
-                    else {
-                        "symbol": normalize_symbol(symbol),
-                        "data_status": "unavailable",
-                        "error": "No verified realtime quote was returned by the configured providers.",
-                    }
-                )
+                    snapshot_quote = snapshot.to_quote()
+                    primary_quotes[normalize_symbol(symbol)] = snapshot_quote
+                quote = self._complete_quotes([normalize_symbol(symbol)], primary_quotes)[normalize_symbol(symbol)]
+                realtime_quote = quote.to_dict()
             except ValueError as exc:
                 realtime_quote = {
                     "symbol": normalize_symbol(symbol),
@@ -384,7 +402,7 @@ class ResearchWebApp:
 
         event = self.memory_store.save_analysis(report, user_query=question, model_name=model_name)
         interaction = self.memory_store.save_interaction_summary(report, question, event.id)
-        result = report.to_dict()
+        result = public_report_payload(report)
         result["memory_event_id"] = event.id
         result["interaction_event_id"] = interaction.id
         return result
@@ -669,6 +687,35 @@ def _optional_float(value: Any) -> float | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
+
+
+def _usable_current_quote(quote: RealtimeQuote) -> bool:
+    has_price = (
+        quote.data_status != "unavailable"
+        and quote.price is not None
+        and quote.price > 0
+    )
+    return has_price and (
+        quote.data_status == "real_time"
+        or quote.trade_date == date.today().isoformat()
+    )
+
+
+def _unavailable_realtime_quote(symbol: str) -> RealtimeQuote:
+    return RealtimeQuote(
+        symbol=symbol,
+        name=None,
+        price=None,
+        previous_close=None,
+        change_pct=None,
+        volume=None,
+        amount=None,
+        trade_date=None,
+        trade_time=None,
+        source="unavailable",
+        data_status="unavailable",
+        error="No current-day quote was returned by the configured real-time providers.",
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 {
-  "rule_version": "2026-07-17.2",
+  "rule_version": "2026-07-20.3",
   "runtime": {
     "network_timeout_seconds": 8,
     "network_retry": {"max_attempts": 2, "initial_backoff_seconds": 0.25, "max_backoff_seconds": 1.0},
@@ -7,7 +7,7 @@
     "llm_request": {"temperature": 0.2, "max_tokens": 2400, "continuation_max_tokens": 1200, "max_continuations": 1},
     "local_server": {"host": "0.0.0.0", "port": 8000},
     "snapshot_max_workers": 4,
-    "realtime_ticker": {"refresh_interval_ms": 3000, "non_realtime_interval_ms": 60000, "error_backoff_ms": 12000, "animation_duration_ms": 420, "maximum_symbols": 100}
+    "realtime_ticker": {"refresh_interval_ms": 3000, "non_realtime_interval_ms": 60000, "error_backoff_ms": 12000, "animation_duration_ms": 420, "maximum_symbols": 100, "fallback_providers": ["tencent", "sina"]}
   },
   "morning_radar": {
     "default_limit": 6,
@@ -18,6 +18,42 @@
       "enabled": true,
       "calendar_lookback_days": 7,
       "minimum_sector_rows": 3
+    }
+  },
+  "reporting": {
+    "presentation": {
+      "judge_title": "主审判官",
+      "research_group_title": "研究方明细",
+      "generic_agent_label": "研究方",
+      "finding_roles": {
+        "市场周期 Agent": "市场审势方",
+        "基本面 Agent": "基本面举证方",
+        "技术分析 Agent": "趋势验证方",
+        "资金流 Agent": "资金审验方",
+        "龙虎榜 Agent": "席位追踪方",
+        "新闻公告 Agent": "公告核验方",
+        "题材热点 Agent": "题材质证方"
+      },
+      "phrase_replacements": {
+        "Agent均分": "研究方均分",
+        "低分 Agent": "低分研究方",
+        "Agent 引用": "研究方引用",
+        "Agent 信誉率": "研究方信誉率",
+        "Agent 权重": "研究方权重"
+      }
+    },
+    "evidence_brief": {
+      "version": "evidence-brief-v1",
+      "neutral_score": 50,
+      "maximum_decisive_evidence": 3,
+      "maximum_counter_evidence": 2,
+      "maximum_observations_per_claim": 3,
+      "maximum_sources_per_claim": 3,
+      "maximum_invalidation_conditions": 4,
+      "maximum_critical_data_gaps": 5,
+      "maximum_gap_characters": 220,
+      "maximum_model_findings": 7,
+      "maximum_model_memory_items": 3
     }
   },
   "opportunity_pipeline": {
@@ -105,7 +141,7 @@
       },
       "circuit_breaker": {"failure_threshold": 2, "cooldown_seconds": 120},
       "verified_cache": {"directory": "data/cache/verified", "directory_env": "TRADINGOS_VERIFIED_CACHE_DIR", "schema_version": "1.2", "fresh_seconds": {"daily_prices": 300, "fundamentals": 86400, "money_flow": 120, "market_context": 120}},
-      "source_lag": {"current_day_grace_enabled": true, "maximum_calendar_days": {"price-001": 4, "flow-001": 4, "market-001": 4}},
+      "source_lag": {"current_day_grace_enabled": true, "previous_session_market_replay_enabled": true, "maximum_calendar_days": {"price-001": 4, "flow-001": 4, "market-001": 4}},
       "quality_summary": {"maximum_visible_warnings": 12, "hide_raw_snapshot_successes": true, "group_raw_snapshot_failures": true}
     },
     "public_fallback": {
@@ -148,6 +184,7 @@
       ,"curl_first": true
     },
     "sina": {"quote_url": "https://hq.sinajs.cn/list=", "headers": {"User-Agent": "TradingAgentsChina/0.1", "Referer": "https://finance.sina.com.cn"}},
+    "tencent": {"quote_url": "https://qt.gtimg.cn/q=", "curl_first": true, "headers": {"User-Agent": "Mozilla/5.0 TradingAgentsChina/0.1", "Accept": "text/plain,*/*", "Referer": "https://gu.qq.com/"}},
     "tushare": {
       "enabled": true,
       "token_env": "TUSHARE_TOKEN",

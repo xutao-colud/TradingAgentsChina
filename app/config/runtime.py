@@ -55,6 +55,10 @@ def _validate(data: object) -> None:
         ("runtime", "realtime_ticker", "error_backoff_ms"),
         ("runtime", "realtime_ticker", "animation_duration_ms"),
         ("runtime", "realtime_ticker", "maximum_symbols"),
+        ("runtime", "realtime_ticker", "fallback_providers"),
+        ("reporting", "evidence_brief"),
+        ("reporting", "presentation"),
+        ("providers", "high_availability", "source_lag", "previous_session_market_replay_enabled"),
         ("opportunity_pipeline", "source_priority"),
         ("opportunity_pipeline", "level1"),
         ("opportunity_pipeline", "level2"),
@@ -76,6 +80,7 @@ def _validate(data: object) -> None:
         ("providers", "public_fallback", "sina_tick_fields"),
         ("providers", "public_fallback", "sina_tick_direction_codes"),
         ("providers", "sina", "quote_url"), ("providers", "sina", "headers"),
+        ("providers", "tencent", "quote_url"), ("providers", "tencent", "headers"),
         ("providers", "tushare", "token_env"), ("providers", "tushare", "interfaces"),
         ("providers", "tushare", "capabilities"),
         ("providers", "tushare", "top_inst_side_codes"),
@@ -167,6 +172,42 @@ def _validate(data: object) -> None:
         or llm_request["max_continuations"] < 0
     ):
         raise RuntimeError("runtime.llm_request token and continuation limits must be positive integers")
+    evidence_brief = settings.get("reporting", "evidence_brief")
+    required_brief_keys = {
+        "version", "neutral_score", "maximum_decisive_evidence", "maximum_counter_evidence",
+        "maximum_observations_per_claim", "maximum_sources_per_claim",
+        "maximum_invalidation_conditions", "maximum_critical_data_gaps",
+        "maximum_gap_characters", "maximum_model_findings", "maximum_model_memory_items",
+    }
+    missing_brief_keys = required_brief_keys - set(evidence_brief)
+    if missing_brief_keys:
+        raise RuntimeError(f"reporting.evidence_brief misses: {', '.join(sorted(missing_brief_keys))}")
+    positive_brief_limits = [
+        evidence_brief[key]
+        for key in required_brief_keys - {"version", "neutral_score"}
+    ]
+    if (
+        not str(evidence_brief["version"]).strip()
+        or not isinstance(evidence_brief["neutral_score"], (int, float))
+        or any(not isinstance(value, int) or value < 1 for value in positive_brief_limits)
+    ):
+        raise RuntimeError("reporting.evidence_brief version and limits must be valid")
+    presentation = settings.get("reporting", "presentation")
+    required_role_ids = {
+        "市场周期 Agent", "基本面 Agent", "技术分析 Agent", "资金流 Agent",
+        "龙虎榜 Agent", "新闻公告 Agent", "题材热点 Agent",
+    }
+    roles = presentation.get("finding_roles")
+    labels = [presentation.get(key) for key in ("judge_title", "research_group_title", "generic_agent_label")]
+    if (
+        not isinstance(roles, dict)
+        or set(roles) != required_role_ids
+        or any(not isinstance(value, str) or not value.strip() for value in roles.values())
+        or len(set(roles.values())) != len(roles)
+        or any(not isinstance(value, str) or not value.strip() for value in labels)
+        or not isinstance(presentation.get("phrase_replacements"), dict)
+    ):
+        raise RuntimeError("reporting.presentation must define complete, unique, non-empty public role labels")
     ticker = settings.get("runtime", "realtime_ticker")
     if ticker["refresh_interval_ms"] < 1000:
         raise RuntimeError("runtime.realtime_ticker.refresh_interval_ms must be at least 1000")
@@ -178,6 +219,19 @@ def _validate(data: object) -> None:
         raise RuntimeError("runtime.realtime_ticker animation must finish before the next refresh")
     if ticker["maximum_symbols"] < 1:
         raise RuntimeError("runtime.realtime_ticker.maximum_symbols must be positive")
+    fallback_providers = ticker["fallback_providers"]
+    if (
+        not isinstance(fallback_providers, list)
+        or not fallback_providers
+        or any(item not in {"tencent", "sina"} for item in fallback_providers)
+        or len(fallback_providers) != len(set(fallback_providers))
+    ):
+        raise RuntimeError("runtime.realtime_ticker.fallback_providers must be a unique non-empty list of configured quote providers")
+    previous_session_replay = settings.get(
+        "providers", "high_availability", "source_lag", "previous_session_market_replay_enabled"
+    )
+    if not isinstance(previous_session_replay, bool):
+        raise RuntimeError("previous_session_market_replay_enabled must be a boolean")
     score_min = settings.get("scoring", "score_bounds", "min")
     score_max = settings.get("scoring", "score_bounds", "max")
     opportunity = settings.get("opportunity_pipeline")
