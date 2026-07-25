@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from app.graph.workflow import build_sample_workflow
 from app.reporting.evidence_brief import build_compact_model_payload
@@ -42,3 +43,17 @@ class ReportPresentationTest(unittest.TestCase):
             "市场审势方", "基本面举证方", "趋势验证方", "资金审验方",
             "席位追踪方", "公告核验方", "题材质证方",
         })
+
+    def test_public_payload_rewrites_internal_model_citation_without_mutating_report(self) -> None:
+        report = build_sample_workflow().run("600519", "2026-07-10")
+        explained = replace(
+            report,
+            model_interpretation="趋势偏强（source id: price-001, as_of: 2026-07-10）。",
+        )
+
+        payload = public_report_payload(explained)
+
+        self.assertNotIn("source id", payload["model_interpretation"])
+        self.assertNotIn("as_of", payload["model_interpretation"])
+        self.assertIn("数据截至 2026-07-10", payload["model_interpretation"])
+        self.assertIn("source id: price-001", explained.model_interpretation)

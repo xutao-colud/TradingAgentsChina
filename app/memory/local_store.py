@@ -550,7 +550,10 @@ def _normalize_watchlist(data: list[Any]) -> list[dict[str, Any]]:
     for raw in data:
         if not isinstance(raw, dict) or not isinstance(raw.get("symbol"), str):
             raise ValueError("Watchlist storage contains an invalid item")
-        symbol = normalize_symbol(raw["symbol"])
+        try:
+            symbol = normalize_symbol(raw["symbol"])
+        except ValueError:
+            continue
         note = str(raw.get("note") or "").strip()[:120]
         existing = by_symbol.get(symbol)
         if existing is None:

@@ -94,6 +94,27 @@ class MorningRadarTest(unittest.TestCase):
         self.assertEqual(snapshot.data_status, "unavailable")
         self.assertFalse(snapshot.fast_movers)
 
+    def test_tracked_quote_fallback_accepts_previous_session_close_on_weekend(self) -> None:
+        client = MorningMoneyRadarClient(
+            fetch_text=lambda url: (_ for _ in ()).throw(OSError("provider unavailable")),
+            quote_fetcher=lambda symbols: {
+                "000725.SZ": RealtimeQuote(
+                    symbol="000725.SZ", name="BOE", price=5.81, previous_close=6.06,
+                    change_pct=-4.13, volume=30_110_000, amount=19_750_000_000,
+                    trade_date="2026-07-24", trade_time="15:00:00",
+                    source="verified_quote_cache:tencent", data_status="latest_available",
+                )
+            },
+            now=lambda: datetime(2026, 7, 25, 10, 0, 0),
+        )
+
+        snapshot = client.fetch_snapshot(limit=3, fallback_symbols=["000725.SZ"])
+
+        self.assertEqual(snapshot.data_status, "tracked_universe")
+        self.assertEqual(snapshot.market_phase, "非交易日")
+        self.assertEqual(snapshot.fast_movers[0].price, 5.81)
+        self.assertEqual(snapshot.as_of, "2026-07-24T15:00:00")
+
     def test_uses_post_market_sector_fallback_before_tracked_quotes(self) -> None:
         def post_market_fallback(limit: int, now: datetime) -> MorningRadarSnapshot:
             self.assertEqual(limit, 3)

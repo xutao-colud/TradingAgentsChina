@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime
 
-from app.market.realtime import SinaRealtimeQuoteClient, TencentRealtimeQuoteClient
+from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient, TencentRealtimeQuoteClient, quote_is_usable
 
 
 def _line(identifier: str, name: str, previous: str, price: str, trade_date: str = "2026-07-13") -> str:
@@ -54,6 +54,25 @@ class SinaRealtimeQuoteClientTest(unittest.TestCase):
 
         self.assertEqual(calls, 2)
         self.assertEqual(quote.data_status, "real_time")
+
+    def test_quote_replay_window_accepts_weekend_close_but_rejects_future_or_expired_data(self) -> None:
+        current = datetime(2026, 7, 25, 10, 0, 0)
+        friday = RealtimeQuote(
+            "000725.SZ", "BOE", 5.81, 6.06, -4.13, 1000, 5_810_000,
+            "2026-07-24", "15:00:00", data_status="latest_available",
+        )
+        future = RealtimeQuote(
+            "000725.SZ", "BOE", 5.81, 6.06, -4.13, 1000, 5_810_000,
+            "2026-07-26", "15:00:00", data_status="latest_available",
+        )
+        expired = RealtimeQuote(
+            "000725.SZ", "BOE", 5.81, 6.06, -4.13, 1000, 5_810_000,
+            "2026-07-01", "15:00:00", data_status="latest_available",
+        )
+
+        self.assertTrue(quote_is_usable(friday, current))
+        self.assertFalse(quote_is_usable(future, current))
+        self.assertFalse(quote_is_usable(expired, current))
 
 
 class TencentRealtimeQuoteClientTest(unittest.TestCase):

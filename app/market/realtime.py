@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
-import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Callable
@@ -11,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.network.retry import retry_call
 
 
@@ -37,6 +36,53 @@ class RealtimeQuote:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def is_continuous_trading_session(now: datetime) -> bool:
+    if now.isoweekday() > 5:
+        return False
+    hhmm = now.hour * 100 + now.minute
+    return 930 <= hhmm <= 1130 or 1300 <= hhmm <= 1500
+
+
+def quote_is_usable(
+    quote: RealtimeQuote,
+    now: datetime | None = None,
+    *,
+    allow_previous_session: bool = True,
+) -> bool:
+    """Admit only priced, dated quotes inside the configured replay window."""
+    current = now or datetime.now()
+    if quote.data_status == "unavailable" or quote.price is None or quote.price <= 0:
+        return False
+    if not quote.trade_date:
+        return False
+    try:
+        trade_day = datetime.fromisoformat(quote.trade_date).date()
+    except ValueError:
+        return False
+    age_days = (current.date() - trade_day).days
+    if age_days < 0:
+        return False
+    if age_days == 0:
+        return True
+    source_lag = load_runtime_settings().get("providers", "high_availability", "source_lag")
+    maximum = int(source_lag["maximum_calendar_days"]["realtime-quote"])
+    return (
+        allow_previous_session
+        and bool(source_lag["previous_session_market_replay_enabled"])
+        and age_days <= maximum
+    )
+
+
+def quote_priority(quote: RealtimeQuote, now: datetime | None = None) -> tuple[int, str, str]:
+    """Rank valid candidates without letting a prior close mask a live quote."""
+    current = now or datetime.now()
+    if not quote_is_usable(quote, current):
+        return (0, "", "")
+    same_day = quote.trade_date == current.date().isoformat()
+    status_rank = 3 if quote.data_status == "real_time" else 2 if same_day else 1
+    return (status_rank, quote.trade_date or "", quote.trade_time or "")
 
 
 class SinaRealtimeQuoteClient:
@@ -242,17 +288,10 @@ def _fetch_tencent_text(url: str) -> str:
     if not url.startswith(config["quote_url"]):
         raise ValueError("Blocked Tencent quote URL")
     if config["curl_first"]:
-        curl = shutil.which("curl")
-        if curl:
-            headers = [arg for name, value in config["headers"].items() for arg in ("-H", f"{name}: {value}")]
-            completed = subprocess.run(
-                [curl, "--http1.1", "-sS", *headers, url],
-                capture_output=True,
-                check=False,
-                timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-            )
-            if completed.returncode == 0 and completed.stdout.strip():
-                return completed.stdout.decode("gbk", errors="replace")
+        try:
+            return fetch_text_with_curl(url, config["headers"], encoding="gbk")
+        except OSError:
+            pass
     request = Request(url, headers=config["headers"])
     with urlopen(request, timeout=load_runtime_settings().get("runtime", "network_timeout_seconds")) as response:
         return response.read().decode("gbk", errors="replace")

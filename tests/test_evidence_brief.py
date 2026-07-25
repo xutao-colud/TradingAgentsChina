@@ -49,6 +49,15 @@ class EvidenceBriefTest(unittest.TestCase):
         self.assertIn("decision_brief", compact)
         self.assertNotIn("data_quality_reports", compact)
         self.assertNotIn("skill_insights", compact)
+        self.assertNotIn('"source_ids"', compact_json)
+        self.assertNotIn('"source_type"', compact_json)
+        self.assertNotIn('"as_of"', compact_json)
+        self.assertNotIn("price-001", compact_json)
+        self.assertNotIn("fund-001", compact_json)
+        self.assertNotIn("flow-001", compact_json)
+        self.assertNotIn("market-001", compact_json)
+        self.assertIn('"source_citations"', compact_json)
+        self.assertIn("数据截至", compact_json)
         self.assertLess(len(compact_json), len(full_json))
 
     def test_markdown_places_evidence_brief_before_scores(self) -> None:

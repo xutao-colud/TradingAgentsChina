@@ -30,7 +30,7 @@ def _prices(count: int, step: float = 0.05) -> list[DailyPrice]:
 
 class NextSessionScenarioTest(unittest.TestCase):
     def test_reports_observed_frequency_with_sample_provenance(self) -> None:
-        insight = analyze_next_session_scenario(_prices(120))
+        insight = analyze_next_session_scenario(_prices(500))
 
         self.assertEqual(insight.details["mode"], "next_session_scenario")
         self.assertTrue(insight.details["observational_only"])
@@ -55,7 +55,12 @@ class NextSessionScenarioTest(unittest.TestCase):
 
     def test_current_bar_is_never_used_as_its_own_outcome(self) -> None:
         rows = _prices(120)
-        first = analyze_next_session_scenario(rows)
+        realtime_quote = {
+            "trade_date": rows[-1].trade_date,
+            "trade_time": "13:30:00",
+            "data_status": "real_time",
+        }
+        first = analyze_next_session_scenario(rows, realtime_quote=realtime_quote)
         changed = list(rows)
         last = changed[-1]
         changed[-1] = DailyPrice(
@@ -68,11 +73,49 @@ class NextSessionScenarioTest(unittest.TestCase):
             last.amount,
             last.turnover_rate,
         )
-        second = analyze_next_session_scenario(changed)
+        second = analyze_next_session_scenario(changed, realtime_quote=realtime_quote)
 
-        self.assertEqual(first.details["sample_end"], rows[-1].trade_date)
-        self.assertEqual(second.details["sample_end"], rows[-1].trade_date)
-        self.assertEqual(first.details["sample_size"], second.details["sample_size"])
+        self.assertEqual(first.details["excluded_incomplete_bar_date"], rows[-1].trade_date)
+        self.assertEqual(second.details["excluded_incomplete_bar_date"], rows[-1].trade_date)
+        self.assertEqual(first.details, second.details)
+
+    def test_completed_current_day_bar_is_retained_after_market_close(self) -> None:
+        rows = _prices(500)
+        realtime_quote = {
+            "trade_date": rows[-1].trade_date,
+            "trade_time": "15:00:01",
+            "data_status": "real_time",
+        }
+
+        insight = analyze_next_session_scenario(rows, realtime_quote=realtime_quote)
+
+        self.assertEqual(insight.details["as_of"], rows[-1].trade_date)
+        self.assertIsNone(insight.details["excluded_incomplete_bar_date"])
+        self.assertEqual(insight.details["rate_basis"], "exact_state_match")
+
+    def test_refuses_full_baseline_when_current_state_samples_are_insufficient(self) -> None:
+        rows = _prices(120)
+        last = rows[-1]
+        rows[-1] = DailyPrice(
+            last.trade_date,
+            last.open,
+            last.high + 10,
+            last.low,
+            last.close + 5,
+            last.volume,
+            last.amount,
+            last.turnover_rate,
+        )
+
+        insight = analyze_next_session_scenario(rows)
+
+        self.assertFalse(insight.details["available"])
+        self.assertEqual(insight.details["sample_size"], 0)
+        self.assertGreaterEqual(insight.details["eligible_outcome_count"], 30)
+        self.assertTrue(insight.details["no_forward_lookahead"])
+        self.assertEqual(insight.details["rate_basis"], "exact_state_match")
+        self.assertNotIn("red_rate_pct", insight.details)
+        self.assertIn("全样本涨跌分布与当前状态不等价", insight.conclusion)
 
 
 if __name__ == "__main__":

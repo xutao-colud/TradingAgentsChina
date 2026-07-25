@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -50,13 +50,29 @@ def _validate(data: object) -> None:
         ("runtime", "llm_request", "temperature"), ("runtime", "llm_request", "max_tokens"),
         ("runtime", "llm_request", "continuation_max_tokens"), ("runtime", "llm_request", "max_continuations"),
         ("runtime", "snapshot_max_workers"),
+        ("runtime", "small_team_test", "enabled"),
+        ("runtime", "small_team_test", "maximum_active_users"),
+        ("runtime", "small_team_test", "maximum_concurrent_research_jobs"),
+        ("runtime", "small_team_test", "session_ttl_hours"),
+        ("runtime", "small_team_test", "remember_session_days"),
+        ("runtime", "small_team_test", "cookie_name"),
+        ("runtime", "small_team_test", "cookie_secure"),
+        ("runtime", "small_team_test", "require_production_provider"),
+        ("runtime", "small_team_test", "allow_browser_model_configuration"),
+        ("runtime", "login_visual", "back_messages"),
+        ("runtime", "login_visual", "back_message_palette"),
         ("runtime", "realtime_ticker", "refresh_interval_ms"),
         ("runtime", "realtime_ticker", "non_realtime_interval_ms"),
         ("runtime", "realtime_ticker", "error_backoff_ms"),
         ("runtime", "realtime_ticker", "animation_duration_ms"),
         ("runtime", "realtime_ticker", "maximum_symbols"),
         ("runtime", "realtime_ticker", "fallback_providers"),
+        ("runtime", "realtime_ticker", "request_timeout_ms"),
+        ("runtime", "realtime_ticker", "request_max_attempts"),
+        ("runtime", "realtime_ticker", "request_retry_backoff_ms"),
+        ("runtime", "realtime_ticker", "daily_close_fallback_bars"),
         ("reporting", "evidence_brief"),
+        ("reporting", "citations"),
         ("reporting", "presentation"),
         ("providers", "high_availability", "source_lag", "previous_session_market_replay_enabled"),
         ("opportunity_pipeline", "source_priority"),
@@ -172,6 +188,55 @@ def _validate(data: object) -> None:
         or llm_request["max_continuations"] < 0
     ):
         raise RuntimeError("runtime.llm_request token and continuation limits must be positive integers")
+    team_test = settings.get("runtime", "small_team_test")
+    if (
+        not isinstance(team_test["enabled"], bool)
+        or not isinstance(team_test["maximum_active_users"], int)
+        or not 3 <= team_test["maximum_active_users"] <= 10
+        or not isinstance(team_test["maximum_concurrent_research_jobs"], int)
+        or not 1 <= team_test["maximum_concurrent_research_jobs"] <= 4
+        or not isinstance(team_test["session_ttl_hours"], int)
+        or team_test["session_ttl_hours"] < 1
+        or not isinstance(team_test["remember_session_days"], int)
+        or team_test["remember_session_days"] < 1
+        or not isinstance(team_test["cookie_name"], str)
+        or not team_test["cookie_name"].strip()
+        or not isinstance(team_test["cookie_secure"], bool)
+        or not isinstance(team_test["require_production_provider"], bool)
+        or not isinstance(team_test["allow_browser_model_configuration"], bool)
+    ):
+        raise RuntimeError(
+            "runtime.small_team_test must define 3-10 users, 1-4 research jobs, "
+            "positive session lifetimes, and explicit security switches"
+        )
+    login_visual = settings.get("runtime", "login_visual")
+    back_messages = login_visual["back_messages"]
+    back_palette = login_visual["back_message_palette"]
+    disallowed_promises = ("一定涨停", "今日涨停", "必涨", "稳赚", "保证收益", "保本")
+    if (
+        not isinstance(back_messages, list)
+        or len(back_messages) < 8
+        or len(set(back_messages)) != len(back_messages)
+        or any(
+            not isinstance(message, str)
+            or not 2 <= len(message.strip()) <= 8
+            or any(term in message for term in disallowed_promises)
+            for message in back_messages
+        )
+        or not isinstance(back_palette, list)
+        or len(back_palette) < 4
+        or any(
+            not isinstance(color, str)
+            or len(color) != 7
+            or not color.startswith("#")
+            or any(character not in "0123456789abcdefABCDEF" for character in color[1:])
+            for color in back_palette
+        )
+    ):
+        raise RuntimeError(
+            "runtime.login_visual requires at least eight unique, non-promissory short messages "
+            "and four valid hex colors"
+        )
     evidence_brief = settings.get("reporting", "evidence_brief")
     required_brief_keys = {
         "version", "neutral_score", "maximum_decisive_evidence", "maximum_counter_evidence",
@@ -192,6 +257,28 @@ def _validate(data: object) -> None:
         or any(not isinstance(value, int) or value < 1 for value in positive_brief_limits)
     ):
         raise RuntimeError("reporting.evidence_brief version and limits must be valid")
+    citations = settings.get("reporting", "citations")
+    required_citation_keys = {
+        "format", "unknown_provider", "unknown_source",
+        "cache_provider_format", "source_type_labels",
+    }
+    if (
+        not isinstance(citations, dict)
+        or not required_citation_keys <= set(citations)
+        or any(
+            not isinstance(citations[key], str) or not citations[key].strip()
+            for key in required_citation_keys - {"source_type_labels"}
+        )
+        or not isinstance(citations["source_type_labels"], dict)
+        or not citations["source_type_labels"]
+        or any(
+            not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip()
+            for key, value in citations["source_type_labels"].items()
+        )
+        or any(token not in citations["format"] for token in ("{title}", "{provider}", "{as_of}"))
+        or "{provider}" not in citations["cache_provider_format"]
+    ):
+        raise RuntimeError("reporting.citations must define readable, non-empty citation labels and formats")
     presentation = settings.get("reporting", "presentation")
     required_role_ids = {
         "市场周期 Agent", "基本面 Agent", "技术分析 Agent", "资金流 Agent",
@@ -219,6 +306,14 @@ def _validate(data: object) -> None:
         raise RuntimeError("runtime.realtime_ticker animation must finish before the next refresh")
     if ticker["maximum_symbols"] < 1:
         raise RuntimeError("runtime.realtime_ticker.maximum_symbols must be positive")
+    if ticker["daily_close_fallback_bars"] < 2:
+        raise RuntimeError("runtime.realtime_ticker.daily_close_fallback_bars must be at least 2")
+    if (
+        ticker["request_timeout_ms"] < 1000
+        or ticker["request_max_attempts"] < 1
+        or ticker["request_retry_backoff_ms"] < 0
+    ):
+        raise RuntimeError("runtime.realtime_ticker request policy must use a positive timeout and bounded attempts")
     fallback_providers = ticker["fallback_providers"]
     if (
         not isinstance(fallback_providers, list)
@@ -232,6 +327,11 @@ def _validate(data: object) -> None:
     )
     if not isinstance(previous_session_replay, bool):
         raise RuntimeError("previous_session_market_replay_enabled must be a boolean")
+    quote_lag_days = settings.get(
+        "providers", "high_availability", "source_lag", "maximum_calendar_days", "realtime-quote"
+    )
+    if not isinstance(quote_lag_days, int) or quote_lag_days < 1:
+        raise RuntimeError("realtime-quote maximum_calendar_days must be a positive integer")
     score_min = settings.get("scoring", "score_bounds", "min")
     score_max = settings.get("scoring", "score_bounds", "max")
     opportunity = settings.get("opportunity_pipeline")
@@ -311,6 +411,9 @@ def _validate(data: object) -> None:
     if scoring_technical["ma_long"] not in technical["return_windows"]:
         raise RuntimeError("technical.return_windows must include scoring.technical.ma_long")
     next_session = settings.get("domain_knowledge", "next_session_scenario")
+    next_session_history_bars = next_session.get("history_bars")
+    if not isinstance(next_session_history_bars, int) or next_session_history_bars < 2:
+        raise RuntimeError("next-session history_bars must be an integer of at least two")
     next_session_windows = {
         next_session["minimum_feature_bars"],
         next_session["trend_window"],
@@ -319,16 +422,28 @@ def _validate(data: object) -> None:
     }
     if any(not isinstance(window, int) or window < 2 for window in next_session_windows):
         raise RuntimeError("next-session scenario windows must be integers of at least two")
-    if max(next_session_windows) >= technical["history_bars"]:
-        raise RuntimeError("technical.history_bars must leave at least one outcome bar for next-session scenarios")
-    if next_session["minimum_similar_samples"] < 1 or next_session["minimum_baseline_samples"] < 1:
-        raise RuntimeError("next-session scenario sample minimums must be positive")
+    if max(next_session_windows) >= next_session_history_bars:
+        raise RuntimeError("next-session history_bars must leave at least one outcome bar")
+    if next_session["minimum_similar_samples"] < 1:
+        raise RuntimeError("next-session minimum_similar_samples must be positive")
     if not 0 <= next_session["flat_band_pct"] < 100:
         raise RuntimeError("next-session flat band must be between zero and 100")
     if not 0 < next_session["volatility_low_pct"] < next_session["volatility_high_pct"]:
         raise RuntimeError("next-session volatility thresholds must be positive and ordered")
     if next_session["wilson_z"] <= 0:
         raise RuntimeError("next-session Wilson z score must be positive")
+    session_close_time = next_session.get("session_close_time")
+    if not isinstance(session_close_time, str) or len(session_close_time.split(":")) != 3:
+        raise RuntimeError("next-session session_close_time must use HH:MM:SS")
+    try:
+        time.fromisoformat(session_close_time)
+    except ValueError as exc:
+        raise RuntimeError("next-session session_close_time must use HH:MM:SS") from exc
+    incomplete_quote_statuses = next_session.get("incomplete_quote_statuses")
+    if not isinstance(incomplete_quote_statuses, list) or not all(
+        isinstance(status, str) and status for status in incomplete_quote_statuses
+    ):
+        raise RuntimeError("next-session incomplete_quote_statuses must be a non-empty string list")
     zones = settings.get("domain_knowledge", "price_observation_zones")
     zone_windows = {
         zones["atr_window"] + 1,

@@ -5,6 +5,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from app.config.runtime import load_runtime_settings
+from app.reporting.citations import sanitize_model_interpretation
 from app.schemas.report import AgentFinding, AnalysisReport, SkillInsight
 
 
@@ -60,6 +61,11 @@ def public_report_payload(report: AnalysisReport) -> dict[str, Any]:
     court = payload.get("decision_brief", {}).get("court")
     if isinstance(court, dict):
         court.setdefault("role_label", str(_config()["judge_title"]))
+    if report.model_interpretation:
+        payload["model_interpretation"] = sanitize_model_interpretation(
+            present_text(report.model_interpretation),
+            report.evidence_sources,
+        )
     return payload
 
 
@@ -103,7 +109,13 @@ def present_analysis_report(report: AnalysisReport) -> AnalysisReport:
         agent_findings=findings,
         skill_insights=insights,
         decision_brief=dict(present_value(report.decision_brief)),
-        model_interpretation=(present_text(report.model_interpretation) if report.model_interpretation else None),
+        model_interpretation=(
+            sanitize_model_interpretation(
+                present_text(report.model_interpretation),
+                report.evidence_sources,
+            )
+            if report.model_interpretation else None
+        ),
     )
 
 

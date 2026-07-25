@@ -10,6 +10,20 @@ class TradingRulesTest(unittest.TestCase):
         self.assertEqual(normalize_symbol("000001"), "000001.SZ")
         self.assertEqual(normalize_symbol("300750"), "300750.SZ")
         self.assertEqual(normalize_symbol("688981"), "688981.SH")
+        self.assertEqual(normalize_symbol("301526.SZ"), "301526.SZ")
+        self.assertEqual(normalize_symbol("301526SZ"), "301526.SZ")
+        self.assertEqual(normalize_symbol("301526\u200cSZ"), "301526.SZ")
+        self.assertEqual(normalize_symbol(" 301526 . sz "), "301526.SZ")
+        self.assertEqual(normalize_symbol("301526．SZ"), "301526.SZ")
+
+    def test_normalize_symbol_rejects_malformed_or_mismatched_codes(self) -> None:
+        for symbol in ("00国际复材.SH", "60051", "600519.XX", "999999"):
+            with self.subTest(symbol=symbol), self.assertRaises(ValueError):
+                normalize_symbol(symbol)
+        with self.assertRaisesRegex(ValueError, "属于 SZ"):
+            normalize_symbol("301526.SH")
+        with self.assertRaisesRegex(ValueError, "属于 SZ"):
+            normalize_symbol("301526\u200cSH")
 
     def test_daily_limit_pct_by_board_and_st_flag(self) -> None:
         self.assertEqual(daily_limit_pct(StockProfile("600519.SH", "贵州茅台", "白酒", "main")), 10)
@@ -33,4 +47,3 @@ class TradingRulesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

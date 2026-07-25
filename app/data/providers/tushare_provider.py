@@ -1318,7 +1318,7 @@ class TushareMarketDataProvider(MarketDataProvider):
         return list(self._evidence.values())
 
     def get_raw_snapshots(self, symbol: str, analysis_date: str) -> list[RawDataSnapshot]:
-        normalized = normalize_symbol(symbol)
+        normalized = symbol if symbol == "__market__" else normalize_symbol(symbol)
         referenced_snapshot_ids = {
             snapshot_id
             for source in self._evidence.values()

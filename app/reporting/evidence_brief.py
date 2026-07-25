@@ -4,6 +4,7 @@ from statistics import fmean
 from typing import Any, Iterable
 
 from app.config.runtime import load_runtime_settings
+from app.reporting.citations import model_friendly_evidence, public_evidence_citation
 from app.reporting.presentation import present_value, role_label, judge_title
 from app.schemas.report import AgentFinding, AnalysisReport, DataQualityReport, EvidenceSource, SkillInsight
 
@@ -64,6 +65,7 @@ def build_compact_model_payload(report: AnalysisReport) -> dict[str, Any]:
         key=lambda item: (item.confidence, abs(item.score - float(config["neutral_score"]))),
         reverse=True,
     )[:maximum_findings]
+    source_map = {source.id: source for source in report.evidence_sources}
     return present_value({
         "identity": {
             "symbol": report.symbol,
@@ -86,7 +88,7 @@ def build_compact_model_payload(report: AnalysisReport) -> dict[str, Any]:
                 "theme": report.theme_score,
             },
         },
-        "decision_brief": report.decision_brief,
+        "decision_brief": model_friendly_evidence(report.decision_brief, source_map),
         "findings": [
             {
                 "agent": role_label(item.agent),
@@ -97,16 +99,18 @@ def build_compact_model_payload(report: AnalysisReport) -> dict[str, Any]:
                 "counterpoints": item.counterpoints[:maximum_observations],
                 "risks": item.risks[:maximum_observations],
                 "invalidation_conditions": item.invalidation_conditions[:maximum_observations],
-                "source_ids": item.source_ids,
+                "source_citations": [
+                    public_evidence_citation(source_map[source_id])
+                    for source_id in item.source_ids
+                    if source_id in source_map
+                ],
             }
             for item in findings
         ],
         "evidence_sources": [
             {
-                "id": source.id,
-                "title": source.title,
-                "source_type": source.source_type,
-                "as_of": source.as_of,
+                "citation": public_evidence_citation(source),
+                "data_date": source.as_of,
             }
             for source in report.evidence_sources
         ],

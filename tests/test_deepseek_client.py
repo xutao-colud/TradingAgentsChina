@@ -45,16 +45,45 @@ class DeepSeekClientTest(unittest.TestCase):
         assert isinstance(messages, list)
         self.assertIn("反推验证", messages[0]["content"])
         self.assertIn("不要输出隐藏思维链", messages[0]["content"])
+        self.assertIn("不得向用户输出 source id", messages[0]["content"])
         self.assertIn("data_status", messages[0]["content"])
         self.assertIn("反推验证任务", messages[1]["content"])
         self.assertIn("确定性证据包", messages[1]["content"])
         self.assertNotIn('"data_quality_reports"', messages[1]["content"])
         self.assertNotIn('"skill_insights"', messages[1]["content"])
+        self.assertNotIn('"source_ids"', messages[1]["content"])
+        self.assertIn('"source_citations"', messages[1]["content"])
         self.assertIn('"data_status": "样例数据"', messages[1]["content"])
         self.assertIn("如果当前结论偏乐观", messages[1]["content"])
         self.assertEqual(explained.model_execution["complete"], True)
         self.assertEqual(explained.model_execution["completion_tokens"], 24)
         self.assertNotIn(EXPLANATION_COMPLETE_MARKER, explained.model_interpretation)
+
+    def test_internal_model_citation_is_sanitized_before_report_storage(self) -> None:
+        report = build_sample_workflow().run("600519", "2026-07-10")
+        response = {
+            "choices": [{
+                "message": {
+                    "content": (
+                        "趋势证据（source id: price-001, as_of: 2026-07-10）需要复核。\n"
+                        f"{EXPLANATION_COMPLETE_MARKER}"
+                    )
+                },
+                "finish_reason": "stop",
+            }],
+        }
+
+        explained = OpenAICompatibleClient(
+            api_key="test-key",
+            base_url="https://example.invalid/v1",
+            model="test-model",
+            provider_name="TestProvider",
+            post_json=lambda *_: response,
+        ).explain(report, {})
+
+        self.assertNotIn("source id", explained.model_interpretation)
+        self.assertNotIn("as_of", explained.model_interpretation)
+        self.assertIn("数据截至 2026-07-10", explained.model_interpretation)
 
     def test_length_finish_reason_triggers_one_continuation_and_stitches_output(self) -> None:
         calls: list[dict[str, object]] = []

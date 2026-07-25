@@ -4,16 +4,93 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>霜降 · A股研究工作台</title>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=20260725-11">
   </head>
   <body>
-    <main class="shell">
+    <section id="loginView" class="login-view" aria-labelledby="loginTitle">
+      <div class="login-visual">
+        <div class="login-brand">
+          <span class="login-brand__mark" aria-hidden="true">霜</span>
+          <div><strong>霜降 TradingOS</strong><small>A-SHARE EVIDENCE DESK</small></div>
+        </div>
+        <div id="loginCharacterStage" class="market-sculpture" aria-hidden="true">
+          <div class="market-sculpture__grid"></div>
+          <div class="market-sculpture__axis"><span>09:30 开盘核验</span><span>11:30 证据复核</span><span>15:00 收盘归档</span></div>
+          <div class="evidence-chip evidence-chip--source"><i></i><span>DATA</span><b>真实来源</b></div>
+          <div class="evidence-chip evidence-chip--court"><i></i><span>COURT</span><b>法庭质证</b></div>
+          <div class="evidence-chip evidence-chip--risk"><i></i><span>RISK</span><b>失效条件</b></div>
+          <i class="market-pillar pillar-one" data-character="price">
+            <span class="character-eyes"><b><em></em></b><b><em></em></b></span>
+            <span class="character-back"><b></b></span>
+            <small>价格</small>
+          </i>
+          <i class="market-pillar pillar-two" data-character="evidence">
+            <span class="character-eyes"><b><em></em></b><b><em></em></b></span>
+            <span class="character-back"><b></b></span>
+            <small>证据</small>
+          </i>
+          <i class="market-pillar pillar-three" data-character="strategy">
+            <span class="character-eyes"><b><em></em></b><b><em></em></b></span>
+            <span class="character-back"><b></b></span>
+            <span class="character-mouth"></span>
+            <small>战法</small>
+          </i>
+          <i class="market-pillar pillar-four" data-character="risk">
+            <span class="character-eyes"><b><em></em></b><b><em></em></b></span>
+            <span class="character-back"><b></b></span>
+            <small>风控</small>
+          </i>
+          <svg class="market-pulse" viewBox="0 0 760 300" role="presentation">
+            <polyline points="0,220 74,202 118,214 185,148 236,166 306,106 363,131 438,72 497,92 560,49 622,83 690,34 760,58"></polyline>
+          </svg>
+        </div>
+        <div class="login-visual__copy">
+          <span>SMALL TEAM / VERIFIED DATA</span>
+          <h2>先核验事实，再进入法庭。</h2>
+          <p>为 3–10 人测试组准备的 A 股研究控制台。价格、证据、战法与风控各自独立发言；生产数据不可用时明确降级。</p>
+        </div>
+        <footer><span>证据优先</span><span>独立档案</span><span>有界研判</span></footer>
+      </div>
+      <div class="login-panel">
+        <form id="loginForm" class="login-form">
+          <p class="login-kicker">PRIVATE RESEARCH ACCESS</p>
+          <h1 id="loginTitle">欢迎回来</h1>
+          <p class="login-subtitle">进入你独立的 A 股研究档案</p>
+          <div class="test-access-notice"><i aria-hidden="true"></i><span><strong>小型测试模式</strong>账号密码暂不校验；请勿使用真实业务密码。</span></div>
+          <label>测试账号
+            <input id="loginAccount" name="account" type="text" maxlength="120" autocomplete="username" placeholder="例如：researcher-01" required>
+          </label>
+          <label>测试密码
+            <span class="password-field">
+              <input id="loginPassword" name="password" type="password" autocomplete="new-password" placeholder="任意非空测试字符" required>
+              <button id="togglePassword" type="button" class="password-toggle" aria-label="显示密码" aria-pressed="false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-5 9.5-5 9.5 5 9.5 5-3.5 5-9.5 5-9.5-5-9.5-5Z"></path><circle cx="12" cy="12" r="2.6"></circle><path class="eye-slash" d="m4 4 16 16"></path></svg>
+              </button>
+            </span>
+          </label>
+          <label class="login-remember"><input id="rememberSession" type="checkbox"><span>在这台设备保留测试会话 30 天</span></label>
+          <button id="loginButton" type="submit" class="login-submit"><span>进入研究台</span><b aria-hidden="true">↗</b></button>
+          <p id="loginMessage" class="login-message" role="alert" aria-live="polite"></p>
+          <div class="login-capacity" id="loginCapacity"><span>席位状态读取中</span><span>真实数据模式</span></div>
+        </form>
+      </div>
+    </section>
+
+    <main id="appShell" class="shell" hidden>
       <header class="masthead">
         <div>
           <p class="kicker">TRADING AGENTS / CHINA</p>
           <h1>霜降 <span>·</span> A股研究工作台</h1>
         </div>
-        <div class="status"><i></i><span id="serverStatus">本地引擎连接中</span></div>
+        <div class="session-console">
+          <div class="status"><i></i><span id="serverStatus">研究引擎连接中</span></div>
+          <div class="session-metrics" id="sessionMetrics">
+            <span>用户 <b id="sessionUser">—</b></span>
+            <span>研判 <b id="analysisCount">0</b></span>
+            <span>模型解释 <b id="modelReasoningCount">0</b></span>
+          </div>
+          <button id="logoutButton" type="button" class="logout-button">退出测试</button>
+        </div>
       </header>
 
       <section class="hero-grid">
@@ -21,7 +98,7 @@
           <div class="card-label">RESEARCH COMMAND</div>
           <h2>今天，研究哪一只？</h2>
           <form id="analysisForm">
-            <label>股票代码<input id="symbol" value="600519" maxlength="9" autocomplete="off"></label>
+            <label>股票代码<input id="symbol" value="600519" title="推荐只输入6位代码；也兼容 301526SZ 或 301526.SZ" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
             <label>分析日期<input id="analysisDate" type="date"></label>
             <label class="wide">你的问题（进入委员会研讨并写入本地摘要）<textarea id="question" rows="3" placeholder="例如：这只股票是否符合我的趋势回踩打法？"></textarea></label>
             <label class="toggle wide"><input id="modelExplain" type="checkbox"><span>使用当前配置模型解释报告与实时行情上下文</span></label>
@@ -42,7 +119,7 @@
               <li data-progress-phase="present"><i>03</i><span>报告归档</span></li>
             </ol>
           </div>
-          <p id="formMessage" class="muted">行情与资金实时优先；财务、公告和市场宽度仍有样例兜底，研究结论不构成投资建议。</p>
+          <p id="formMessage" class="muted">只使用生产数据源与已核验缓存；数据不足时拒绝强结论，不使用样例行情兜底。研究结论不构成投资建议。</p>
         </article>
 
         <article class="market-tape">
@@ -62,7 +139,7 @@
           <div class="section-heading"><span>00</span><h2>盘中自选</h2><button id="refreshMarket" type="button" class="quiet-button">刷新实时行情 ↻</button></div>
           <div id="tickerStatus" class="ticker-status"><i aria-hidden="true"></i><span>自动报价待启动</span></div>
           <form id="watchlistForm" class="inline-form">
-            <label>股票代码<input id="watchSymbol" placeholder="600519" maxlength="9"></label>
+            <label>股票代码<input id="watchSymbol" placeholder="301526（无需后缀）" title="推荐只输入6位代码；也兼容 301526SZ 或 301526.SZ" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
             <label class="watch-note">观察备注<input id="watchNote" placeholder="例如：等待回踩确认"></label>
             <button type="submit">加入自选</button>
           </form>
@@ -74,7 +151,7 @@
           <div class="section-heading"><span>账户</span><h2>本地账户快照</h2></div>
           <div class="account-stats" id="accountStats"></div>
           <form id="cashForm" class="account-form"><label>账户可用余额<input id="cashBalance" type="number" min="0" step="0.01" placeholder="0.00"></label><button type="submit">保存余额</button></form>
-          <form id="positionForm" class="position-form"><label>持仓代码<input id="positionSymbol" placeholder="600519"></label><label>数量<input id="positionQty" type="number" min="1" step="1" placeholder="100"></label><label>成本价<input id="positionCost" type="number" min="0" step="0.0001" placeholder="1500.00"></label><button type="submit">保存持仓</button></form>
+          <form id="positionForm" class="position-form"><label>持仓代码<input id="positionSymbol" placeholder="600519（无需后缀）" title="推荐只输入6位代码；也兼容 301526SZ 或 301526.SZ" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label><label>数量<input id="positionQty" type="number" min="1" step="1" placeholder="100"></label><label>成本价<input id="positionCost" type="number" min="0" step="0.0001" placeholder="1500.00"></label><button type="submit">保存持仓</button></form>
           <div id="positionRows" class="position-rows"><div class="empty-state compact">尚未记录持仓。</div></div>
           <p class="muted">仅本地记录，不连接券商、不执行交易。实时价格仅用于研究与快照估算。</p>
         </article>
@@ -102,7 +179,10 @@
             <div class="narrative"><h4>行动框架</h4><p id="actionPlan"></p><h4>关键风险</h4><ul id="risks"></ul></div>
             <button id="committeeButton" type="button" class="court-button" hidden>查看投资流派法庭</button>
             <div class="skills-wrap"><h4>领域 Skills</h4><div id="skills"></div></div>
-            <div id="modelSection" hidden class="model-note"><h4 id="modelInterpretationTitle">模型解释</h4><p id="modelInterpretation"></p></div>
+            <div id="modelSection" hidden class="model-note">
+              <h4 id="modelInterpretationTitle">模型解释</h4>
+              <div id="modelInterpretation" class="model-interpretation"></div>
+            </div>
           </div>
         </article>
 
@@ -151,6 +231,6 @@
         <div id="committeeFactions" class="committee-factions"></div>
       </section>
     </div>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260725-10"></script>
   </body>
 </html>

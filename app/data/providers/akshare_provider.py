@@ -501,13 +501,14 @@ class AkshareSupplementProvider(ProviderAdapter):
         return items
 
     def get_evidence_sources(self, symbol: str, analysis_date: str) -> list[EvidenceSource]:
+        normalized = symbol if symbol == "__market__" else normalize_symbol(symbol)
         return [
-            *self._announcement_sources.get((normalize_symbol(symbol), analysis_date), []),
+            *self._announcement_sources.get((normalized, analysis_date), []),
             *self._market_sources.get(analysis_date, []),
         ]
 
     def get_raw_snapshots(self, symbol: str, analysis_date: str) -> list[RawDataSnapshot]:
-        normalized = normalize_symbol(symbol)
+        normalized = symbol if symbol == "__market__" else normalize_symbol(symbol)
         referenced_ids = {
             snapshot_id
             for (report_symbol, report_date, _), report in self._quality_reports.items()
@@ -526,7 +527,7 @@ class AkshareSupplementProvider(ProviderAdapter):
         ]
 
     def get_data_quality_reports(self, symbol: str, analysis_date: str) -> list[DataQualityReport]:
-        normalized = normalize_symbol(symbol)
+        normalized = symbol if symbol == "__market__" else normalize_symbol(symbol)
         semantic = [
             report
             for (report_symbol, report_date, _), report in self._quality_reports.items()

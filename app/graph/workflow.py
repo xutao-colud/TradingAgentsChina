@@ -101,10 +101,14 @@ class AShareResearchWorkflow:
 
     def _collect_data(self, state: ResearchState) -> None:
         state.profile = self.provider.get_stock_profile(state.symbol)
+        price_history_bars = max(
+            required_history_bars(),
+            int(load_runtime_settings().get("domain_knowledge", "next_session_scenario", "history_bars")),
+        )
         state.prices = self.provider.get_daily_prices(
             state.symbol,
             state.analysis_date,
-            lookback_days=required_history_bars(),
+            lookback_days=price_history_bars,
         )
         state.fundamentals = self.provider.get_fundamentals(state.symbol, state.analysis_date)
         state.industry_context = self.provider.get_industry_context(state.symbol, state.analysis_date)
@@ -180,7 +184,7 @@ class AShareResearchWorkflow:
             analyze_tiered_money_flow(state.money_flow),
             analyze_capital_flow_continuity(state.prices, state.capital_flow_history),
             analyze_turnover_continuity(state.prices),
-            analyze_next_session_scenario(state.prices, state.data_readiness),
+            analyze_next_session_scenario(state.prices, state.data_readiness, state.realtime_quote),
             analyze_price_observation_zones(state.prices, state.fundamentals, state.data_readiness),
             analyze_ah_premium(state.ah_premium, state.data_quality_reports) if state.ah_premium else None,
             analyze_intraday_snapshot(state.intraday) if state.intraday else None,

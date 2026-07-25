@@ -7,7 +7,7 @@ from app.schemas.report import AnalysisReport
 from app.reporting.evidence_brief import build_compact_model_payload, compact_memory_context
 
 
-PROMPT_CONTRACT_VERSION = "evidence-brief-v4"
+PROMPT_CONTRACT_VERSION = "evidence-brief-v5"
 EXPLANATION_COMPLETE_MARKER = "<!-- TRADINGOS_EXPLANATION_COMPLETE -->"
 
 
@@ -22,10 +22,13 @@ def build_explanation_system_prompt() -> str:
         "不得更改评分/评级/风控结论，不得给出自动交易指令。\n\n"
         "你的核心任务是反推验证：不要只顺着当前结论解释，要从“如果当前结论是错的，"
         "最可能错在哪里”开始审查证据。请输出可审计的结论，不要输出隐藏思维链或逐步"
-        "内心推理过程。优先读取 decision_brief；每条关键判断必须写出 source id 和 as_of，"
+        "内心推理过程。优先读取 decision_brief；每条关键判断只能复制证据包提供的"
+        "中文 citation，格式为【证据名称｜来源机构｜数据截至 日期】；"
+        "不得向用户输出 source id、source_id、as_of 等内部字段，"
+        "不得编写“如 source id...”之类的占位示例，"
         "不要重复罗列完整质量日志。\n\n"
         "输出必须包含以下小节：\n"
-        "1. 当前结论被哪些证据支持：引用证据简报中的具体分数、观测值、source id 和 as_of。\n"
+        "1. 当前结论被哪些证据支持：引用证据简报中的具体分数、观测值和中文 citation。\n"
         "2. 最强反证：列出最能推翻当前结论的证据、冲突和数据缺口。\n"
         "3. 反推失效条件：如果出现哪些市场、资金、技术、公告或规则信号，当前路线应降权。\n"
         "4. 三种交易剧本：强化、观望、失效；每个剧本只写观察条件和应对原则，不写确定涨跌。\n"

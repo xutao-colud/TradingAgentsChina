@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Callable
@@ -12,8 +10,9 @@ from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.network.retry import retry_call
-from app.market.realtime import RealtimeQuote
+from app.market.realtime import RealtimeQuote, is_continuous_trading_session, quote_is_usable
 
 
 FetchText = Callable[[str], str]
@@ -325,27 +324,8 @@ def _fetch_text(url: str) -> str:
 
 
 def _fetch_text_with_curl(url: str) -> str:
-    curl = shutil.which("curl")
-    if not curl:
-        raise OSError("curl is unavailable and Python HTTP request failed")
     headers = load_runtime_settings().get("providers", "eastmoney", "headers")
-    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
-    completed = subprocess.run(
-        [
-            curl,
-            "--http1.1",
-            "-sS",
-            *curl_headers,
-            url,
-        ],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise OSError((completed.stderr or "curl returned no data").strip())
-    return completed.stdout
+    return fetch_text_with_curl(url, headers)
 
 
 def _eastmoney_source(url: str) -> str:
@@ -437,17 +417,16 @@ def _latest_quote_as_of(quotes: list[RealtimeQuote], fallback: datetime) -> str:
 
 
 def _usable_tracked_quote(quote: RealtimeQuote, now: datetime) -> bool:
-    """Reject stale cached quotes from the intraday radar evidence chain."""
+    """Allow a recent close only outside continuous trading hours."""
     has_required_fields = (
-        quote.data_status != "unavailable"
-        and quote.price is not None
-        and quote.price > 0
-        and quote.change_pct is not None
+        quote.change_pct is not None
+        and quote_is_usable(
+            quote,
+            now,
+            allow_previous_session=not is_continuous_trading_session(now),
+        )
     )
-    return has_required_fields and (
-        quote.data_status == "real_time"
-        or quote.trade_date == now.date().isoformat()
-    )
+    return has_required_fields
 
 
 def _market_phase(now: datetime) -> str:
