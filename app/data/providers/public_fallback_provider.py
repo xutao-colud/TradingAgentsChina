@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import shutil
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
@@ -13,6 +11,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.data.providers.base import MarketDataProvider, ProviderCapabilities
 from app.data.quality import validate_dataset_records
 from app.data.raw_snapshots import InMemoryRawSnapshotStore, RawDataSnapshot, RawSnapshotStore, build_raw_snapshot
@@ -700,17 +699,7 @@ def _fetch_text(url: str) -> str:
 
 
 def _fetch_text_with_curl(url: str, config: dict[str, Any]) -> str:
-    curl = shutil.which("curl")
-    if not curl:
-        raise OSError("curl is unavailable")
-    headers = [arg for name, value in config["headers"].items() for arg in ("-H", f"{name}: {value}")]
-    completed = subprocess.run(
-        [curl, "--http1.1", "-sS", *headers, url], capture_output=True, text=True, check=False,
-        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise OSError((completed.stderr or "curl returned no data").strip())
-    return completed.stdout
+    return fetch_text_with_curl(url, config["headers"])
 
 
 def _tencent_code(symbol: str) -> str:

@@ -1,8 +1,8 @@
 # TradingAgentsChina
 
-A-share focused research-agent MVP inspired by TradingAgents.
+A-share focused evidence-driven research system inspired by TradingAgents.
 
-This first version is intentionally small: it runs offline with a sample data provider, separates deterministic calculations from agent reasoning, and produces both JSON and Markdown reports for one stock/date.
+The default CLI and web paths use production providers, separate deterministic calculations from model explanation, and produce traceable JSON/Markdown research reports. Offline sample data remains available only through explicit regression-test construction.
 
 ## What the MVP Does
 
@@ -152,9 +152,13 @@ Run the first dashboard version:
 python -m app.web.server --host 0.0.0.0 --port 8000
 ```
 
-On this computer, open `http://127.0.0.1:8000`. Devices on the same trusted Wi-Fi/LAN can use `http://<this-computer's-IPv4>:8000`; run `ipconfig` on Windows to find the IPv4 address. The dashboard listens on all local network interfaces. Model-key entry is accepted only when the TCP client address is loopback or an address assigned to the server machine itself; other LAN devices cannot submit or clear keys. Configure keys from the server computer, or set the provider environment variable before startup. Keep the firewall rule on the **Private** profile only and do not expose or port-forward this service to the public internet.
+On this computer, open `http://127.0.0.1:8000`. Devices on the same trusted Wi-Fi/LAN can use `http://<this-computer's-IPv4>:8000`; run `ipconfig` on Windows to find the IPv4 address. The dashboard listens on all local network interfaces.
 
-The server defaults to `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It never substitutes `SampleMarketDataProvider` unless the operator explicitly starts it with `--provider sample`.
+The default UI is a **3–10 person functional test gate**, not finished authentication. Any non-empty test account/password can enter; passwords are neither verified nor persisted. Each normalized account alias receives an isolated directory under `data/memory/users/`, so watchlists, positions, reports, and `TradingProfile` do not mix between aliases. The process admits at most 10 active aliases and two simultaneous heavy research jobs by default. These limits, session lifetime, cookie policy, production-provider requirement, and browser key-entry policy are versioned under `runtime.small_team_test` in `config/tradingos.default.json`.
+
+Browser model-key entry is disabled in small-team mode. Configure `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` in the deployment environment before startup. The login page is only a test workflow boundary: it does not make the standard-library server safe for untrusted public Internet access. Use a trusted LAN, VPN, or SSH tunnel until real authentication, HTTPS, CSRF protection, and a tenant database are implemented.
+
+The small-team web server requires `ProductionMarketDataProvider`, uses authenticated Tushare plus the configured public supplements, and returns `数据不足` when a production dimension is unavailable. It refuses a `--provider sample` startup; `SampleMarketDataProvider` remains available only to offline CLI/unit regression tests.
 
 ### Watchlist, account snapshot, and real-time quotes
 
@@ -208,7 +212,7 @@ growth_result = run_backtest(profile, daily_bars, spec, regimes=regime_by_date, 
 
 Small samples do not display an empirical positive-trade rate. Backtest output is research evidence, not a return promise or automatic order.
 
-The current product remains local single-user software, but the codebase now reserves a multi-tenant SaaS boundary: `TenantContext`, consent-gated strategy outcomes, cautious cohort analytics, and a PostgreSQL RLS migration. Account balances and position details are explicitly excluded from cross-user analytics. Read [the SaaS architecture](docs/v3/saas-architecture.md) and [strategy analytics limits](docs/v3/strategy-analytics.md) before exposing the product to external users.
+The current web product is a single-process small-team test adapter with isolated local directories, not a production multi-tenant SaaS. The codebase reserves a future SaaS boundary through `TenantContext`, consent-gated strategy outcomes, cautious cohort analytics, and a PostgreSQL RLS migration. Account balances and position details are explicitly excluded from cross-user analytics. Read [the SaaS architecture](docs/v3/saas-architecture.md), [the small-team test design](docs/plans/2026-07-24-small-team-test-product-design.md), and [strategy analytics limits](docs/v3/strategy-analytics.md) before exposing the product to external users.
 
 ## Run the local MCP server
 
@@ -231,6 +235,6 @@ DeepSeek receives the deterministic report and a compact local-memory summary on
 
 ## Multi-model live explanation
 
-The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. Select a provider, model name, and API Key in the **实时解释引擎** card, click **配置当前模型**, then tick **使用当前配置模型解释报告与实时行情上下文** before analysis. Each analysis is bound to that saved provider/model pair; an unsaved selection is rejected instead of falling back to the previous model.
+The dashboard supports DeepSeek, GLM（智谱）and Qwen（百炼）through fixed official OpenAI-compatible endpoints. In small-team mode, the deployment environment selects the configured provider/model and the browser fields are read-only. Tick **使用当前配置模型解释报告与实时行情上下文** before analysis. Each analysis is bound to the active provider/model pair; an inconsistent selection is rejected instead of falling back to the previous model.
 
-For safety, keys entered in the page are session-only: they are not returned by APIs, never enter Memory exports, and disappear when the local service restarts. Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables if you need the key available after a restart. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle, and [the flexibility audit](docs/v3/flexibility-audit.md) for hard-coded areas that should become versioned configuration.
+Use `DEEPSEEK_API_KEY`, `ZAI_API_KEY`, or `DASHSCOPE_API_KEY` environment variables; keys are never returned by APIs or included in Memory exports. Browser key entry can only be re-enabled through an explicit trusted-local configuration override. See [the model runtime guide](docs/v2/model-runtime.md) for the exact endpoints and lifecycle, and [the flexibility audit](docs/v3/flexibility-audit.md) for hard-coded areas that should become versioned configuration.

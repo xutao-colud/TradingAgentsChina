@@ -2,19 +2,82 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 
 from app.memory.local_store import LocalMemoryStore
+from app.data.verified_cache import VerifiedDatasetCache
+from app.data.providers.sample_provider import SampleMarketDataProvider
 from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.llm.runtime import ModelRuntime
 from app.llm.prompt_contracts import EXPLANATION_COMPLETE_MARKER
-from app.graph.workflow import build_sample_workflow
+from app.graph.workflow import AShareResearchWorkflow, build_sample_workflow
+from app.schemas.report import DailyPrice
 from app.web.server import ResearchWebApp, _is_local_machine_address, _is_loopback_address
 
 
 class ResearchWebAppTest(unittest.TestCase):
+    def test_watchlist_rejects_invalid_symbols_and_infers_the_correct_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(LocalMemoryStore(tmpdir), workflow=build_sample_workflow())
+
+            with self.assertRaisesRegex(ValueError, "6位数字"):
+                app.add_watchlist({"symbol": "00国际复材"})
+            with self.assertRaisesRegex(ValueError, "属于 SZ"):
+                app.add_watchlist({"symbol": "301526.SH"})
+            with self.assertRaisesRegex(ValueError, "属于 SZ"):
+                app.add_watchlist({"symbol": "301526\u200cSH"})
+
+            result = app.add_watchlist({"symbol": "301526\u200cSZ"})
+            self.assertEqual(result["items"], [{"symbol": "301526.SZ", "note": ""}])
+
+    def test_watchlist_removal_returns_persisted_server_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalMemoryStore(tmpdir)
+            app = ResearchWebApp(store, workflow=build_sample_workflow())
+            app.add_watchlist({"symbol": "600519", "note": "保留历史研判"})
+            app.add_watchlist({"symbol": "000725", "note": "继续观察"})
+
+            result = app.remove_watchlist({"symbol": "600519.SH"})
+
+            self.assertEqual(result["items"], [{"symbol": "000725.SZ", "note": "继续观察"}])
+            self.assertEqual(store.load_watchlist(), result["items"])
+
+    def test_analysis_falls_back_when_primary_quote_has_zero_price(self) -> None:
+        class ZeroPriceSnapshotClient:
+            def fetch_snapshot(self, symbol: str):
+                quote = RealtimeQuote(
+                    symbol="000725.SZ", name="BOE", price=0.0, previous_close=6.0,
+                    change_pct=None, volume=0, amount=0, trade_date="2026-07-20",
+                    trade_time="09:20:00", source="eastmoney_push2delay",
+                    data_status="latest_available",
+                )
+                return type("Snapshot", (), {"to_quote": lambda self: quote})()
+
+        fallback = RealtimeQuote(
+            symbol="000725.SZ", name="BOE", price=6.18, previous_close=6.0,
+            change_pct=3.0, volume=1_000_000, amount=6_180_000,
+            trade_date="2026-07-20", trade_time="09:35:00", source="sina",
+            data_status="real_time",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=type("QuoteClient", (), {"fetch_quotes": lambda self, symbols: {"000725.SZ": fallback}})(),
+                stock_snapshot_client=ZeroPriceSnapshotClient(),
+            )
+
+            result = app.analyze({
+                "symbol": "000725",
+                "analysis_date": "2026-07-20",
+                "include_realtime": True,
+            })
+
+            self.assertEqual(result["realtime_quote"]["source"], "sina")
+            self.assertEqual(result["realtime_quote"]["price"], 6.18)
+
     def test_model_secret_access_is_limited_to_loopback_clients(self) -> None:
         self.assertTrue(_is_loopback_address("127.0.0.1"))
         self.assertTrue(_is_loopback_address("::1"))
@@ -66,6 +129,9 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(result["data_status"], "样例数据")
             self.assertEqual(result["user_question"], "是否符合我的趋势回踩打法？")
             committee = next(item for item in result["skill_insights"] if item["category"] == "committee")
+            public_roles = {item["agent"] for item in result["agent_findings"]}
+            self.assertIn("资金审验方", public_roles)
+            self.assertEqual(committee["details"]["judge"]["role_label"], "主审判官")
             scenario = next(item for item in result["skill_insights"] if item["details"].get("mode") == "next_session_scenario")
             zones = next(item for item in result["skill_insights"] if item["details"].get("mode") == "price_observation_zones")
             self.assertEqual(committee["details"]["judge"]["discussion_topic"], "是否符合我的趋势回踩打法？")
@@ -76,6 +142,8 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertIn("memory_event_id", result)
             context = app.memory_store.build_context("600519.SH")
             self.assertEqual(context["recent_same_symbol_interactions"][0]["question"], "是否符合我的趋势回踩打法？")
+            stored_report = app.memory_store.recent_analyses("600519.SH")[0]["payload"]["report"]
+            self.assertIn("资金流 Agent", {item["agent"] for item in stored_report["agent_findings"]})
 
     def test_dashboard_service_exports_and_imports_memory(self) -> None:
         with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as target_dir:
@@ -96,7 +164,7 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(app.playbooks()["active_playbook"], "institutional_growth")
 
     def test_dashboard_watchlist_account_and_real_time_refresh(self) -> None:
-        response = 'var hq_str_sh600519="贵州茅台,10,1500,1515,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-11,14:30:00";'
+        response = f'var hq_str_sh600519="贵州茅台,10,1500,1515,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{date.today().isoformat()},14:30:00";'
         with tempfile.TemporaryDirectory() as tmpdir:
             app = ResearchWebApp(LocalMemoryStore(tmpdir), quote_client=SinaRealtimeQuoteClient(fetch_text=lambda url: response))
             app.add_watchlist({"symbol": "600519", "note": "核心观察"})
@@ -160,7 +228,7 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(market["source"], "eastmoney_push2+eastmoney_push2his")
 
     def test_dashboard_refresh_falls_back_to_sina_price_when_snapshot_is_unavailable(self) -> None:
-        response = 'var hq_str_sz000725="京东方A,7.20,7.10,7.25,0,0,0,0,100,725000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-13,10:15:00";'
+        response = f'var hq_str_sz000725="京东方A,7.20,7.10,7.25,0,0,0,0,100,725000,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{date.today().isoformat()},10:15:00";'
 
         with tempfile.TemporaryDirectory() as tmpdir:
             app = ResearchWebApp(
@@ -175,6 +243,232 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(market["watchlist"][0]["quote"]["source"], "sina")
             self.assertEqual(market["watchlist"][0]["quote"]["price"], 7.25)
             self.assertEqual(market["watchlist"][0]["snapshot"]["data_status"], "unavailable")
+
+    def test_dashboard_keeps_watchlist_row_when_every_quote_source_is_unavailable(self) -> None:
+        class UnavailableClient:
+            def fetch_quotes(self, symbols):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=UnavailableClient(),
+            )
+            app.add_watchlist({"symbol": "000725", "note": "persist me"})
+
+            market = app.refresh_market()
+
+            self.assertEqual(len(market["watchlist"]), 1)
+            self.assertEqual(market["watchlist"][0]["symbol"], "000725.SZ")
+            self.assertEqual(market["watchlist"][0]["quote"]["data_status"], "unavailable")
+            self.assertEqual(app.watchlist()["items"][0]["note"], "persist me")
+
+    def test_dashboard_replays_only_fresh_verified_current_day_quote(self) -> None:
+        class CurrentClient:
+            def fetch_quotes(self, symbols):
+                return {
+                    "000725.SZ": RealtimeQuote(
+                        "000725.SZ", "京东方A", 5.81, 6.06, -4.13, 1000, 5_810_000,
+                        date.today().isoformat(), "14:30:00",
+                        source="tencent", data_status="real_time",
+                    )
+                }
+
+        class UnavailableClient:
+            def fetch_quotes(self, symbols):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = VerifiedDatasetCache(f"{tmpdir}/verified")
+            first = ResearchWebApp(
+                LocalMemoryStore(f"{tmpdir}/first"),
+                workflow=build_sample_workflow(),
+                quote_client=CurrentClient(),
+                quote_cache=cache,
+            )
+            first.add_watchlist({"symbol": "000725"})
+            self.assertEqual(first.refresh_market()["source"], "tencent")
+
+            second = ResearchWebApp(
+                LocalMemoryStore(f"{tmpdir}/second"),
+                workflow=build_sample_workflow(),
+                quote_client=UnavailableClient(),
+                quote_cache=cache,
+            )
+            second.add_watchlist({"symbol": "000725"})
+            replayed = second.refresh_market()
+            quote = replayed["watchlist"][0]["quote"]
+
+            self.assertEqual(quote["price"], 5.81)
+            self.assertEqual(quote["data_status"], "latest_available")
+            self.assertEqual(quote["source"], "verified_quote_cache:tencent")
+            self.assertEqual(replayed["cache_replay_count"], 1)
+
+    def test_weekend_refresh_keeps_previous_session_quote(self) -> None:
+        class FridayCloseClient:
+            def fetch_quotes(self, symbols):
+                return {
+                    "000725.SZ": RealtimeQuote(
+                        "000725.SZ", "BOE", 5.81, 6.06, -4.13, 1000, 5_810_000,
+                        "2026-07-24", "15:00:00",
+                        source="tencent", data_status="latest_available",
+                    )
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            client = FridayCloseClient()
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=client,
+                quote_fallback_clients=[client],
+                now=lambda: datetime(2026, 7, 25, 10, 0, 0),
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            market = app.refresh_market()
+            ticker = app.refresh_ticker()
+
+            self.assertEqual(market["watchlist"][0]["quote"]["price"], 5.81)
+            self.assertEqual(market["watchlist"][0]["quote"]["trade_date"], "2026-07-24")
+            self.assertEqual(ticker["quotes"]["000725.SZ"]["data_status"], "latest_available")
+            self.assertFalse(ticker["live_session"])
+            self.assertEqual(ticker["refresh_interval_ms"], 60000)
+
+    def test_weekend_refresh_replays_integrity_checked_cache_beyond_live_ttl(self) -> None:
+        class ExpiredFreshnessCache(VerifiedDatasetCache):
+            def is_fresh(self, dataset, metadata):
+                return False
+
+        class UnavailableClient:
+            def fetch_quotes(self, symbols):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = ExpiredFreshnessCache(f"{tmpdir}/verified")
+            cache.save(
+                "realtime_quote",
+                "000725.SZ",
+                RealtimeQuote(
+                    "000725.SZ", "BOE", 5.81, 6.06, -4.13, 1000, 5_810_000,
+                    "2026-07-24", "15:00:00",
+                    source="tencent", data_status="latest_available",
+                ),
+                source_type="tencent",
+                as_of="2026-07-24T15:00:00",
+            )
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=UnavailableClient(),
+                quote_fallback_clients=[UnavailableClient()],
+                quote_cache=cache,
+                now=lambda: datetime(2026, 7, 25, 18, 0, 0),
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            quote = app.refresh_market()["watchlist"][0]["quote"]
+
+            self.assertEqual(quote["price"], 5.81)
+            self.assertEqual(quote["source"], "verified_quote_cache:tencent")
+            self.assertEqual(quote["data_status"], "latest_available")
+            self.assertIn("2026-07-24T15:00:00", quote["error"])
+
+    def test_weekend_refresh_uses_real_daily_close_when_quote_sources_and_cache_are_empty(self) -> None:
+        class ProductionDailyFixtureProvider(SampleMarketDataProvider):
+            data_mode = "production"
+
+            def get_daily_prices(self, symbol, analysis_date, lookback_days):
+                return [
+                    DailyPrice("2026-07-23", 6.00, 6.12, 5.95, 6.06, 900, 5_454_000, 1.2),
+                    DailyPrice("2026-07-24", 6.01, 6.03, 5.78, 5.81, 1000, 5_810_000, 1.5),
+                ]
+
+        class UnavailableClient:
+            def fetch_quotes(self, symbols):
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=AShareResearchWorkflow(ProductionDailyFixtureProvider()),
+                quote_client=UnavailableClient(),
+                quote_fallback_clients=[UnavailableClient()],
+                now=lambda: datetime(2026, 7, 25, 18, 0, 0),
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            quote = app.refresh_market()["watchlist"][0]["quote"]
+
+            self.assertEqual(quote["price"], 5.81)
+            self.assertEqual(quote["previous_close"], 6.06)
+            self.assertEqual(quote["trade_date"], "2026-07-24")
+            self.assertEqual(quote["data_status"], "latest_available")
+            self.assertTrue(quote["source"].startswith("daily_close:"))
+
+    def test_refresh_recovers_when_snapshot_client_raises_unexpected_error(self) -> None:
+        class BrokenSnapshotClient:
+            def fetch_snapshots(self, symbols):
+                raise AttributeError("provider reader failed")
+
+        class CurrentClient:
+            def fetch_quotes(self, symbols):
+                return {
+                    "000725.SZ": RealtimeQuote(
+                        "000725.SZ", "京东方A", 5.81, 6.06, -4.13, 1000, 5_810_000,
+                        date.today().isoformat(), "14:30:00",
+                        source="tencent", data_status="real_time",
+                    )
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                stock_snapshot_client=BrokenSnapshotClient(),
+                quote_fallback_clients=[CurrentClient()],
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            refreshed = app.refresh_market()
+
+            self.assertEqual(refreshed["watchlist"][0]["quote"]["price"], 5.81)
+            self.assertIn("AttributeError", refreshed["warnings"][0])
+
+    def test_dashboard_rejects_stale_close_and_uses_current_fallback_quote(self) -> None:
+        class StaleClient:
+            def fetch_quotes(self, symbols):
+                return {"000725.SZ": RealtimeQuote(
+                    "000725.SZ", "BOE", 6.07, 6.0, 1.17, 1000, 607000,
+                    "2026-07-17", "15:00:00", source="stale_cache", data_status="latest_available",
+                )}
+
+        class CurrentClient:
+            def fetch_quotes(self, symbols):
+                return {"000725.SZ": RealtimeQuote(
+                    "000725.SZ", "BOE", 5.79, 6.07, -4.61, 2_681_321_000, 15_825_022_216,
+                    "2026-07-20", "10:15:00", source="tencent", data_status="real_time",
+                )}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=StaleClient(),
+                quote_fallback_clients=[StaleClient(), CurrentClient()],
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            market = app.refresh_market()
+            ticker = app.refresh_ticker()
+
+            quote = market["watchlist"][0]["quote"]
+            self.assertEqual(quote["price"], 5.79)
+            self.assertEqual(quote["trade_date"], "2026-07-20")
+            self.assertEqual(quote["source"], "tencent")
+            self.assertEqual(ticker["quotes"]["000725.SZ"]["price"], 5.79)
+            self.assertTrue(ticker["live_session"])
 
     def test_dashboard_model_configuration_never_returns_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -217,7 +511,7 @@ class ResearchWebAppTest(unittest.TestCase):
             self.assertEqual(saved["payload"]["model_name"], "qwen:qwen-plus")
 
     def test_analysis_can_attach_labelled_realtime_context(self) -> None:
-        response = 'var hq_str_sh600519="贵州茅台,10,1500,1515,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2026-07-11,14:30:00";'
+        response = f'var hq_str_sh600519="贵州茅台,10,1500,1515,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,{date.today().isoformat()},14:30:00";'
         with tempfile.TemporaryDirectory() as tmpdir:
             app = ResearchWebApp(LocalMemoryStore(tmpdir), quote_client=SinaRealtimeQuoteClient(fetch_text=lambda url: response))
             result = app.analyze({"symbol": "600519", "analysis_date": "2026-07-10", "include_realtime": True})
@@ -269,7 +563,43 @@ class ResearchWebAppTest(unittest.TestCase):
             radar = app.morning_radar({"limit": 3})
 
             self.assertEqual(radar["data_status"], "tracked_universe")
-            self.assertEqual(radar["source"], "sina_tracked_universe+eastmoney_stock_flow")
+            self.assertEqual(radar["source"], "tracked_universe:sina+eastmoney_stock_flow")
             self.assertEqual(radar["top_inflow_sectors"], [])
             self.assertEqual(radar["fast_movers"][0]["name"], "BOE")
             self.assertEqual(radar["fast_movers"][0]["main_net_inflow"], 440532224.0)
+
+    def test_default_radar_uses_configured_quote_failover_for_tracked_universe(self) -> None:
+        class UnavailableClient:
+            def fetch_quotes(self, symbols):
+                return {}
+
+        class CurrentTencentClient:
+            def fetch_quotes(self, symbols):
+                return {
+                    "000725.SZ": RealtimeQuote(
+                        symbol="000725.SZ", name="BOE", price=5.79,
+                        previous_close=6.07, change_pct=-4.61,
+                        volume=2_681_321_000, amount=15_825_022_216,
+                        trade_date=date.today().isoformat(), trade_time="10:15:00",
+                        source="tencent", data_status="real_time",
+                    )
+                }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app = ResearchWebApp(
+                LocalMemoryStore(tmpdir),
+                workflow=build_sample_workflow(),
+                quote_client=UnavailableClient(),
+                quote_fallback_clients=[UnavailableClient(), CurrentTencentClient()],
+            )
+            app.morning_radar_client._fetch_text = lambda url: (_ for _ in ()).throw(
+                OSError("all Eastmoney radar endpoints failed")
+            )
+            app.add_watchlist({"symbol": "000725"})
+
+            radar = app.morning_radar({"limit": 3})
+
+            self.assertEqual(radar["data_status"], "tracked_universe")
+            self.assertEqual(radar["source"], "tracked_universe:tencent")
+            self.assertEqual(radar["top_inflow_sectors"], [])
+            self.assertEqual(radar["fast_movers"][0]["price"], 5.79)

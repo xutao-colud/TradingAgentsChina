@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
+from typing import Callable
 
 from app.config.runtime import load_runtime_settings
 from app.data.providers.akshare_provider import AkshareSupplementProvider
@@ -43,6 +44,7 @@ class ProductionMarketDataProvider(MarketDataProvider):
         eastmoney_flow_client: EastmoneyStockSnapshotClient | None = None,
         verified_cache: VerifiedDatasetCache | None = None,
         circuit_breaker: ProviderCircuitBreaker | None = None,
+        today: Callable[[], date] | None = None,
     ) -> None:
         raw_store = LocalRawSnapshotStore.from_runtime()
         self.tushare = tushare or TushareMarketDataProvider(raw_store=raw_store)
@@ -56,6 +58,7 @@ class ProductionMarketDataProvider(MarketDataProvider):
         )
         self.verified_cache = verified_cache or (NullVerifiedDatasetCache() if injected_provider else VerifiedDatasetCache())
         self.circuit_breaker = circuit_breaker or ProviderCircuitBreaker()
+        self._today = today or date.today
         self._signal_cache: dict[tuple[str, str], AshareMarketSignals] = {}
         self._evidence: dict[tuple[str, str], list[EvidenceSource]] = {}
         self._price_source: dict[tuple[str, str], str] = {}
@@ -327,7 +330,53 @@ class ProductionMarketDataProvider(MarketDataProvider):
                 "market-001", "最近已核验市场宽度快照", f"verified_cache:{metadata['source_type']}", metadata["as_of"], snapshot_ids=[metadata["sha256"]],
             ))
             return context
+        previous_session = self._recent_cached_market_context(analysis_date)
+        if previous_session is not None:
+            return previous_session
         return context
+
+    def _recent_cached_market_context(self, analysis_date: str) -> MarketContext | None:
+        """Replay a verified prior-session market snapshot for current-day research.
+
+        This keeps the market-first court operable when live breadth providers
+        fail during the session.  The snapshot remains explicitly delayed and
+        market skills must not treat it as same-session breadth.
+        """
+        source_lag = load_runtime_settings().get("providers", "high_availability", "source_lag")
+        if (
+            not source_lag["previous_session_market_replay_enabled"]
+            or analysis_date != self._today().isoformat()
+        ):
+            return None
+        maximum_lag = int(source_lag["maximum_calendar_days"].get("market-001", 0))
+        analysis_day = date.fromisoformat(analysis_date)
+        for lag in range(1, maximum_lag + 1):
+            candidate_date = (analysis_day - timedelta(days=lag)).isoformat()
+            cached = self.verified_cache.load("market_context", candidate_date, _market_context_from_dict)
+            if cached is None:
+                continue
+            context, metadata = cached
+            if context.data_status == "unavailable" or not metadata.get("as_of"):
+                continue
+            delayed = replace(
+                context,
+                data_status="latest_available",
+                as_of=metadata["as_of"],
+                unavailable_reasons=[
+                    f"盘中市场全景源暂不可用；当前仅回放 {metadata['as_of']} 的最近已核验市场快照。",
+                    *context.unavailable_reasons,
+                ],
+            )
+            self._selected_sources[("__market__", analysis_date, "market_context")] = "verified_cache_previous_session"
+            self._append_evidence("__market__", analysis_date, EvidenceSource(
+                "market-001",
+                "最近已核验的上一交易日市场全景快照",
+                f"verified_cache_previous_session:{metadata['source_type']}",
+                metadata["as_of"],
+                snapshot_ids=[metadata["sha256"]],
+            ))
+            return delayed
+        return None
 
     def get_ah_premium(self, symbol: str, analysis_date: str) -> AhPremiumSnapshot:
         return self.tushare.get_ah_premium(symbol, analysis_date) if self.tushare.configured else AhPremiumSnapshot("unavailable", analysis_date, _normalized(symbol))

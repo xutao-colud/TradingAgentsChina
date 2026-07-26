@@ -24,7 +24,10 @@ class WorkflowTest(unittest.TestCase):
 
         self.assertEqual(
             provider.requested_lookback_days,
-            load_runtime_settings().get("domain_knowledge", "technical", "history_bars"),
+            max(
+                load_runtime_settings().get("domain_knowledge", "technical", "history_bars"),
+                load_runtime_settings().get("domain_knowledge", "next_session_scenario", "history_bars"),
+            ),
         )
         technical = next(item for item in report.agent_findings if item.agent == "技术分析 Agent")
         self.assertTrue(any("MA60/MA120" in item and "数据不足" not in item for item in technical.evidence))

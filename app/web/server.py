@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import socket
 from dataclasses import replace
+from datetime import datetime
 from functools import lru_cache
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from threading import RLock
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from app.config.runtime import load_runtime_settings
+from app.data.verified_cache import NullVerifiedDatasetCache, VerifiedDatasetCache
 from app.graph.workflow import AShareResearchWorkflow, build_default_workflow, build_production_workflow, build_sample_workflow
 from app.llm.runtime import ModelRuntime
 from app.mcp.server import McpToolServer
@@ -19,12 +25,26 @@ from app.memory.local_store import LocalMemoryStore
 from app.memory.models import FeedbackEvent
 from app.opportunities.pipeline import OpportunityPipeline
 from app.market.morning_radar import MorningMoneyRadarClient
-from app.market.realtime import RealtimeQuote, SinaRealtimeQuoteClient
+from app.market.realtime import (
+    RealtimeQuote,
+    SinaRealtimeQuoteClient,
+    TencentRealtimeQuoteClient,
+    quote_is_usable,
+    quote_priority,
+)
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.market.tushare_radar import TushareIndustryRadarFallback
 from app.playbooks.catalog import get_playbook, list_playbooks
 from app.portfolio.snapshot import build_portfolio_snapshot, quote_advice
+from app.reporting.presentation import public_report_payload
 from app.rules.trading_rules import normalize_symbol
+from app.web.team_access import (
+    ResearchCapacityGate,
+    TestAccessCapacityError,
+    TestAccessSession,
+    TestAccessSessionRegistry,
+    UserResearchAppPool,
+)
 
 
 STATIC_DIR = Path(__file__).with_name("static")
@@ -33,6 +53,17 @@ MODEL_CONFIG_LOCAL_ONLY_ERROR = (
     "请在服务器电脑打开 http://127.0.0.1:8000，或使用该电脑自己的局域网 IP；"
     "其他局域网设备请通过环境变量配置密钥。"
 )
+
+
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Prevent two dashboard versions from sharing one Windows port."""
+
+    allow_reuse_address = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class ResearchWebApp:
@@ -46,17 +77,31 @@ class ResearchWebApp:
         morning_radar_client: MorningMoneyRadarClient | None = None,
         stock_snapshot_client: EastmoneyStockSnapshotClient | None = None,
         model_runtime: ModelRuntime | None = None,
+        quote_fallback_clients: list[Any] | None = None,
+        quote_cache: VerifiedDatasetCache | NullVerifiedDatasetCache | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.memory_store = memory_store
         self.workflow = workflow or build_default_workflow()
         self.mcp_server = McpToolServer(provider=self.workflow.provider, memory_store=memory_store)
         self.quote_client = quote_client or SinaRealtimeQuoteClient()
+        self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
+        if quote_fallback_clients is not None:
+            self.quote_fallback_clients = quote_fallback_clients
+        elif quote_client is not None:
+            self.quote_fallback_clients = [quote_client]
+        else:
+            clients = {"tencent": TencentRealtimeQuoteClient(), "sina": self.quote_client}
+            order = load_runtime_settings().get("runtime", "realtime_ticker", "fallback_providers")
+            self.quote_fallback_clients = [clients[provider] for provider in order]
+        self.quote_cache = quote_cache or NullVerifiedDatasetCache()
+        self._quote_cache_lock = RLock()
+        self._now = now or datetime.now
         sector_fallback = _build_sector_radar_fallback(self.workflow.provider)
         self.morning_radar_client = morning_radar_client or MorningMoneyRadarClient(
-            quote_fetcher=self.quote_client.fetch_quotes,
+            quote_fetcher=self._fetch_current_quotes,
             secondary_fetcher=sector_fallback.fetch_snapshot if sector_fallback else None,
         )
-        self.stock_snapshot_client = stock_snapshot_client if stock_snapshot_client is not None else (None if quote_client is not None else EastmoneyStockSnapshotClient())
         self.model_runtime = model_runtime or ModelRuntime(memory_store.root / "model_settings.json")
         self.opportunity_pipeline = OpportunityPipeline(
             self.workflow,
@@ -150,15 +195,16 @@ class ResearchWebApp:
         portfolio = self.memory_store.load_portfolio()
         symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
         unique_symbols = list(dict.fromkeys(symbols))
-        snapshots = self.stock_snapshot_client.fetch_snapshots(unique_symbols) if self.stock_snapshot_client else {}
-        quotes = {
-            symbol: snapshot.to_quote()
-            for symbol, snapshot in snapshots.items()
-            if snapshot.data_status != "unavailable" and snapshot.price is not None
-        }
-        missing_quote_symbols = [symbol for symbol in unique_symbols if symbol not in quotes]
-        if missing_quote_symbols:
-            quotes.update(self.quote_client.fetch_quotes(missing_quote_symbols))
+        snapshot_error: str | None = None
+        try:
+            snapshots = self.stock_snapshot_client.fetch_snapshots(unique_symbols) if self.stock_snapshot_client else {}
+        except Exception as exc:
+            snapshots = {}
+            snapshot_error = f"{type(exc).__name__}: {exc}"
+        quotes = self._complete_quotes(
+            unique_symbols,
+            {symbol: snapshot.to_quote() for symbol, snapshot in snapshots.items()},
+        )
         watch_rows = [
             {
                 **item,
@@ -167,30 +213,20 @@ class ResearchWebApp:
                 "advice": quote_advice(quotes[item["symbol"]]),
             }
             for item in watchlist
-            if item["symbol"] in quotes
         ]
-        verified_eastmoney_symbols = {
-            symbol
-            for symbol, snapshot in snapshots.items()
-            if snapshot.data_status != "unavailable" and snapshot.price is not None
-        }
-        verified_eastmoney_sources = list(dict.fromkeys(
-            snapshot.source
-            for symbol, snapshot in snapshots.items()
-            if symbol in verified_eastmoney_symbols
+        available_sources = list(dict.fromkeys(
+            quote.source for quote in quotes.values() if quote_is_usable(quote, self._now())
         ))
-        if verified_eastmoney_symbols and missing_quote_symbols:
-            source = "+".join([*verified_eastmoney_sources, "sina_fallback"])
-        elif verified_eastmoney_symbols:
-            source = "+".join(verified_eastmoney_sources)
-        elif quotes:
-            source = "sina"
-        else:
-            source = "unavailable"
+        cache_replay_count = sum(
+            quote.source.startswith("verified_quote_cache:")
+            for quote in quotes.values()
+        )
         return {
             "watchlist": watch_rows,
             "portfolio": build_portfolio_snapshot(portfolio, quotes),
-            "source": source,
+            "source": "+".join(available_sources) if available_sources else "unavailable",
+            "cache_replay_count": cache_replay_count,
+            "warnings": [f"个股快照源本轮失败：{snapshot_error}"] if snapshot_error else [],
         }
 
     def refresh_ticker(self) -> dict[str, Any]:
@@ -200,24 +236,22 @@ class ResearchWebApp:
         symbols = [item["symbol"] for item in watchlist] + [item["symbol"] for item in portfolio["positions"]]
         maximum = int(load_runtime_settings().get("runtime", "realtime_ticker", "maximum_symbols"))
         unique_symbols = list(dict.fromkeys(symbols))[:maximum]
-        quotes: dict[str, RealtimeQuote] = {}
+        primary_quotes: dict[str, RealtimeQuote] = {}
         fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
         if callable(fetch_quotes):
-            quotes.update(fetch_quotes(unique_symbols))
-        missing_symbols = [
-            symbol for symbol in unique_symbols
-            if symbol not in quotes or quotes[symbol].data_status == "unavailable" or quotes[symbol].price is None
-        ]
-        if missing_symbols:
-            quotes.update(self.quote_client.fetch_quotes(missing_symbols))
+            try:
+                primary_quotes.update(fetch_quotes(unique_symbols))
+            except Exception:
+                primary_quotes = {}
+        quotes = self._complete_quotes(unique_symbols, primary_quotes)
         available_sources = list(dict.fromkeys(
             quote.source
             for quote in quotes.values()
-            if quote.data_status != "unavailable" and quote.price is not None
+            if quote_is_usable(quote, self._now())
         ))
         ticker_config = load_runtime_settings().get("runtime", "realtime_ticker")
         live_session = any(
-            quote.data_status == "real_time" and quote.price is not None
+            quote.data_status == "real_time" and quote_is_usable(quote, self._now())
             for quote in quotes.values()
         )
         return {
@@ -227,7 +261,164 @@ class ResearchWebApp:
             "tracked_count": len(unique_symbols),
             "refresh_interval_ms": ticker_config["refresh_interval_ms"] if live_session else ticker_config["non_realtime_interval_ms"],
             "live_session": live_session,
+            "cache_replay_count": sum(
+                quote.source.startswith("verified_quote_cache:")
+                for quote in quotes.values()
+            ),
         }
+
+    def _complete_quotes(
+        self,
+        symbols: list[str],
+        primary_quotes: dict[str, RealtimeQuote],
+    ) -> dict[str, RealtimeQuote]:
+        """Complete tracked quotes without ever dropping a persisted symbol."""
+        current = self._now()
+        quotes: dict[str, RealtimeQuote] = {}
+
+        def merge(candidates: dict[str, RealtimeQuote]) -> None:
+            for symbol, quote in candidates.items():
+                if symbol not in symbols or not quote_is_usable(quote, current):
+                    continue
+                existing = quotes.get(symbol)
+                if existing is None or quote_priority(quote, current) > quote_priority(existing, current):
+                    quotes[symbol] = quote
+
+        merge(primary_quotes)
+        for client in self.quote_fallback_clients:
+            unresolved = [
+                symbol
+                for symbol in symbols
+                if quote_priority(quotes.get(symbol, _unavailable_realtime_quote(symbol)), current)[0] < 3
+            ]
+            if not unresolved:
+                break
+            try:
+                secondary = client.fetch_quotes(unresolved)
+            except (OSError, RuntimeError, ValueError):
+                secondary = {}
+            merge(secondary)
+        for symbol in symbols:
+            cached = self._load_verified_quote(symbol)
+            if cached is not None:
+                merge({symbol: cached})
+        self._remember_verified_quotes(quotes)
+        daily_close_quotes: dict[str, RealtimeQuote] = {}
+        for symbol in symbols:
+            if symbol not in quotes:
+                daily_close = self._load_latest_daily_close_quote(symbol)
+                if daily_close is not None:
+                    daily_close_quotes[symbol] = daily_close
+                    merge({symbol: daily_close})
+        self._remember_verified_quotes(daily_close_quotes)
+        for symbol in symbols:
+            quotes.setdefault(symbol, _unavailable_realtime_quote(symbol))
+        return quotes
+
+    def _remember_verified_quotes(self, quotes: dict[str, RealtimeQuote]) -> None:
+        current = self._now()
+        with self._quote_cache_lock:
+            for symbol, quote in quotes.items():
+                if not quote_is_usable(quote, current) or quote.source.startswith("verified_quote_cache:"):
+                    continue
+                as_of = "T".join(filter(None, [quote.trade_date, quote.trade_time]))
+                try:
+                    self.quote_cache.save(
+                        "realtime_quote",
+                        symbol,
+                        quote,
+                        source_type=quote.source,
+                        as_of=as_of or current.date().isoformat(),
+                    )
+                except (OSError, TypeError, ValueError):
+                    continue
+
+    def _load_verified_quote(self, symbol: str) -> RealtimeQuote | None:
+        with self._quote_cache_lock:
+            loaded = self.quote_cache.load(
+                "realtime_quote",
+                symbol,
+                lambda row: RealtimeQuote(**row),
+            )
+            if loaded is None:
+                return None
+            quote, metadata = loaded
+            if not quote_is_usable(quote, self._now()):
+                return None
+            return replace(
+                quote,
+                source=f"verified_quote_cache:{metadata['source_type']}",
+                data_status="latest_available",
+                error=(
+                    "实时行情源本轮未返回更优数据，回放完整性校验通过的"
+                    f"最近交易日快照（数据时间：{metadata['as_of']}）。"
+                ),
+            )
+
+    def _load_latest_daily_close_quote(self, symbol: str) -> RealtimeQuote | None:
+        """Use real daily bars as the last resort; sample data never enters this path."""
+        provider = self.workflow.provider
+        if getattr(provider, "data_mode", "production") != "production":
+            return None
+        current = self._now()
+        bars = int(load_runtime_settings().get("runtime", "realtime_ticker", "daily_close_fallback_bars"))
+        analysis_date = current.date().isoformat()
+        try:
+            prices = provider.get_daily_prices(symbol, analysis_date, lookback_days=bars)
+        except Exception:
+            return None
+        ordered = sorted(
+            (
+                item
+                for item in prices
+                if item.close > 0 and item.volume >= 0 and item.trade_date <= analysis_date
+            ),
+            key=lambda item: item.trade_date,
+        )
+        if not ordered:
+            return None
+        latest = ordered[-1]
+        previous_close = ordered[-2].close if len(ordered) > 1 and ordered[-2].close > 0 else None
+        change_pct = (
+            round((latest.close / previous_close - 1) * 100, 4)
+            if previous_close is not None
+            else None
+        )
+        source_type = "production_daily_prices"
+        try:
+            evidence = provider.get_evidence_sources(symbol, analysis_date)
+            price_source = next((item for item in evidence if item.id == "price-001"), None)
+            if price_source is not None:
+                source_type = price_source.source_type
+        except Exception:
+            pass
+        quote = RealtimeQuote(
+            symbol=symbol,
+            name=None,
+            price=latest.close,
+            previous_close=previous_close,
+            change_pct=change_pct,
+            volume=latest.volume,
+            amount=latest.amount,
+            trade_date=latest.trade_date,
+            trade_time="15:00:00",
+            source=f"daily_close:{source_type}",
+            data_status="latest_available",
+            error="实时报价不可用，已切换到真实日线 Provider 的最近交易日收盘快照。",
+        )
+        return quote if quote_is_usable(quote, current) else None
+
+    def _fetch_current_quotes(self, symbols: list[str]) -> dict[str, RealtimeQuote]:
+        """Use the same verified failover chain for ticker and radar fallbacks."""
+        normalized = list(dict.fromkeys(normalize_symbol(symbol) for symbol in symbols))
+        primary_quotes: dict[str, RealtimeQuote] = {}
+        fetch_quotes = getattr(self.stock_snapshot_client, "fetch_quotes", None)
+        if callable(fetch_quotes):
+            try:
+                primary_quotes.update(fetch_quotes(normalized))
+            except (OSError, RuntimeError, ValueError):
+                primary_quotes = {}
+        return self._complete_quotes(normalized, primary_quotes)
 
     def morning_radar(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
@@ -339,22 +530,13 @@ class ResearchWebApp:
         quote = None
         if payload.get("include_realtime") is True:
             try:
+                primary_quotes: dict[str, RealtimeQuote] = {}
                 if self.stock_snapshot_client:
                     snapshot = self.stock_snapshot_client.fetch_snapshot(symbol)
-                    quote = snapshot.to_quote() if snapshot.data_status != "unavailable" and snapshot.price is not None else None
-                    if quote is None:
-                        quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
-                else:
-                    quote = self.quote_client.fetch_quotes([symbol]).get(normalize_symbol(symbol))
-                realtime_quote = (
-                    quote.to_dict()
-                    if quote
-                    else {
-                        "symbol": normalize_symbol(symbol),
-                        "data_status": "unavailable",
-                        "error": "No verified realtime quote was returned by the configured providers.",
-                    }
-                )
+                    snapshot_quote = snapshot.to_quote()
+                    primary_quotes[normalize_symbol(symbol)] = snapshot_quote
+                quote = self._complete_quotes([normalize_symbol(symbol)], primary_quotes)[normalize_symbol(symbol)]
+                realtime_quote = quote.to_dict()
             except ValueError as exc:
                 realtime_quote = {
                     "symbol": normalize_symbol(symbol),
@@ -384,7 +566,7 @@ class ResearchWebApp:
 
         event = self.memory_store.save_analysis(report, user_query=question, model_name=model_name)
         interaction = self.memory_store.save_interaction_summary(report, question, event.id)
-        result = report.to_dict()
+        result = public_report_payload(report)
         result["memory_event_id"] = event.id
         result["interaction_event_id"] = interaction.id
         return result
@@ -422,85 +604,138 @@ class ResearchWebApp:
 
 class TradingDeskHandler(BaseHTTPRequestHandler):
     app: ResearchWebApp
+    user_apps: UserResearchAppPool | None = None
+    test_sessions: TestAccessSessionRegistry | None = None
+    research_capacity: ResearchCapacityGate | None = None
+    team_test_config: dict[str, Any] | None = None
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/api/health":
-            self._write_json(HTTPStatus.OK, self.app.health())
+        route = self._route_path()
+        if route == "/api/session":
+            self._write_json(HTTPStatus.OK, self._session_payload())
             return
-        if self.path == "/api/profile":
-            self._write_json(HTTPStatus.OK, self.app.profile())
+        if route == "/api/health":
+            self._write_json(HTTPStatus.OK, self._health_payload())
             return
-        if self.path == "/api/tools":
-            self._write_json(HTTPStatus.OK, {"tools": self.app.tools()})
+        session = self._require_test_session() if route.startswith("/api/") else None
+        if route.startswith("/api/") and session is None:
             return
-        if self.path == "/api/playbooks":
-            self._write_json(HTTPStatus.OK, self.app.playbooks())
+        app = self._app_for_session(session)
+        if route == "/api/profile":
+            self._write_json(HTTPStatus.OK, app.profile())
             return
-        if self.path == "/api/watchlist":
-            self._write_json(HTTPStatus.OK, self.app.watchlist())
+        if route == "/api/tools":
+            self._write_json(HTTPStatus.OK, {"tools": app.tools()})
             return
-        if self.path == "/api/portfolio":
-            self._write_json(HTTPStatus.OK, self.app.portfolio())
+        if route == "/api/playbooks":
+            self._write_json(HTTPStatus.OK, app.playbooks())
             return
-        if self.path == "/api/models":
-            self._write_json(HTTPStatus.OK, self.app.model_status())
+        if route == "/api/watchlist":
+            self._write_json(HTTPStatus.OK, app.watchlist())
             return
-        if self.path == "/api/opportunities":
-            self._write_json(HTTPStatus.OK, self.app.opportunity_pool())
+        if route == "/api/portfolio":
+            self._write_json(HTTPStatus.OK, app.portfolio())
             return
-        self._serve_static()
+        if route == "/api/models":
+            self._write_json(HTTPStatus.OK, app.model_status())
+            return
+        if route == "/api/opportunities":
+            self._write_json(HTTPStatus.OK, app.opportunity_pool())
+            return
+        self._serve_static(route)
 
     def do_POST(self) -> None:  # noqa: N802
+        route = self._route_path()
         try:
+            if route == "/api/session/login":
+                self._login_test_session(self._read_json())
+                return
+            if route == "/api/session/logout":
+                self._logout_test_session()
+                return
+            session = self._require_test_session()
+            if session is None:
+                return
+            app = self._app_for_session(session)
             payload = self._read_json()
-            if self.path == "/api/analyze":
-                self._write_json(HTTPStatus.OK, self.app.analyze(payload))
-            elif self.path == "/api/feedback":
-                self._write_json(HTTPStatus.OK, self.app.feedback(payload))
-            elif self.path == "/api/playbook/activate":
-                self._write_json(HTTPStatus.OK, self.app.activate_playbook(payload))
-            elif self.path == "/api/watchlist":
-                self._write_json(HTTPStatus.OK, self.app.add_watchlist(payload))
-            elif self.path == "/api/watchlist/remove":
-                self._write_json(HTTPStatus.OK, self.app.remove_watchlist(payload))
-            elif self.path == "/api/portfolio/cash":
-                self._write_json(HTTPStatus.OK, self.app.update_cash_balance(payload))
-            elif self.path == "/api/portfolio/position":
-                self._write_json(HTTPStatus.OK, self.app.upsert_position(payload))
-            elif self.path == "/api/portfolio/position/remove":
-                self._write_json(HTTPStatus.OK, self.app.remove_position(payload))
-            elif self.path == "/api/market/refresh":
-                self._write_json(HTTPStatus.OK, self.app.refresh_market())
-            elif self.path == "/api/market/ticker":
-                self._write_json(HTTPStatus.OK, self.app.refresh_ticker())
-            elif self.path == "/api/morning/radar":
-                self._write_json(HTTPStatus.OK, self.app.morning_radar(payload))
-            elif self.path == "/api/opportunities/scan":
-                self._write_json(HTTPStatus.OK, self.app.scan_opportunities(payload))
-            elif self.path == "/api/opportunities/replay":
-                self._write_json(HTTPStatus.OK, self.app.replay_opportunity(payload))
-            elif self.path == "/api/models/configure":
-                if not self._is_local_client():
+            if route == "/api/analyze":
+                capacity = self._required_capacity_gate()
+                with capacity.slot("analysis"):
+                    result = app.analyze(payload)
+                execution = result.get("model_execution")
+                if isinstance(execution, dict) and execution.get("status") == "succeeded":
+                    capacity.record_model_explanation()
+                self._write_json(HTTPStatus.OK, result)
+            elif route == "/api/feedback":
+                self._write_json(HTTPStatus.OK, app.feedback(payload))
+            elif route == "/api/playbook/activate":
+                self._write_json(HTTPStatus.OK, app.activate_playbook(payload))
+            elif route == "/api/watchlist":
+                self._write_json(HTTPStatus.OK, app.add_watchlist(payload))
+            elif route == "/api/watchlist/remove":
+                self._write_json(HTTPStatus.OK, app.remove_watchlist(payload))
+            elif route == "/api/portfolio/cash":
+                self._write_json(HTTPStatus.OK, app.update_cash_balance(payload))
+            elif route == "/api/portfolio/position":
+                self._write_json(HTTPStatus.OK, app.upsert_position(payload))
+            elif route == "/api/portfolio/position/remove":
+                self._write_json(HTTPStatus.OK, app.remove_position(payload))
+            elif route == "/api/market/refresh":
+                self._write_json(HTTPStatus.OK, app.refresh_market())
+            elif route == "/api/market/ticker":
+                self._write_json(HTTPStatus.OK, app.refresh_ticker())
+            elif route == "/api/morning/radar":
+                self._write_json(HTTPStatus.OK, app.morning_radar(payload))
+            elif route == "/api/opportunities/scan":
+                with self._required_capacity_gate().slot("opportunity_scan"):
+                    result = app.scan_opportunities(payload)
+                self._write_json(HTTPStatus.OK, result)
+            elif route == "/api/opportunities/replay":
+                self._write_json(HTTPStatus.OK, app.replay_opportunity(payload))
+            elif route == "/api/models/configure":
+                if not self._browser_model_configuration_allowed():
+                    self._write_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "小型团队测试模式不允许浏览器录入模型密钥，请由部署环境变量统一配置。"},
+                    )
+                elif not self._is_local_client():
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": MODEL_CONFIG_LOCAL_ONLY_ERROR})
                 else:
-                    self._write_json(HTTPStatus.OK, self.app.configure_model(payload))
-            elif self.path == "/api/models/clear":
-                if not self._is_local_client():
+                    self._write_json(HTTPStatus.OK, app.configure_model(payload))
+            elif route == "/api/models/clear":
+                if not self._browser_model_configuration_allowed():
+                    self._write_json(
+                        HTTPStatus.FORBIDDEN,
+                        {"error": "小型团队测试模式的模型密钥由部署环境变量管理，页面不能清除。"},
+                    )
+                elif not self._is_local_client():
                     self._write_json(HTTPStatus.FORBIDDEN, {"error": MODEL_CONFIG_LOCAL_ONLY_ERROR})
                 else:
-                    self._write_json(HTTPStatus.OK, self.app.clear_model_key(payload))
-            elif self.path == "/api/memory/import":
-                self._write_json(HTTPStatus.OK, {"added_events": self.app.import_memory(payload)})
-            elif self.path == "/api/memory/export":
+                    self._write_json(HTTPStatus.OK, app.clear_model_key(payload))
+            elif route == "/api/memory/import":
+                self._write_json(HTTPStatus.OK, {"added_events": app.import_memory(payload)})
+            elif route == "/api/memory/export":
                 self._write_json(
                     HTTPStatus.OK,
-                    self.app.export_memory(),
+                    app.export_memory(),
                     headers={"Content-Disposition": 'attachment; filename="trading-agents-memory.json"'},
                 )
             else:
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "Unknown API route"})
+        except TestAccessCapacityError as exc:
+            self._write_json(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                {"error": str(exc)},
+                headers={"Retry-After": "5"},
+            )
         except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception as exc:
+            print(f"[web] unhandled {self.path}: {type(exc).__name__}: {exc}")
+            self._write_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "服务暂时不可用，已保留页面现有数据；请稍后重试。"},
+            )
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -511,18 +746,140 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
             raise ValueError("JSON body must be an object")
         return payload
 
+    def _route_path(self) -> str:
+        path = urlsplit(self.path).path
+        return path.rstrip("/") or "/"
+
     def _is_local_client(self) -> bool:
         """Allow secret entry from this machine, never by client-controlled headers."""
         return _is_local_machine_address(self.client_address[0])
 
-    def _serve_static(self) -> None:
+    def _health_payload(self) -> dict[str, Any]:
+        payload = self.app.health()
+        config = self.team_test_config or {}
+        capacity = self.research_capacity.metrics() if self.research_capacity else {}
+        payload.update(
+            {
+                "mode": "small_team_test" if config.get("enabled") else payload.get("mode", "local"),
+                "real_data_only": bool(config.get("require_production_provider")),
+                "test_access": {
+                    "credential_validation": False,
+                    "maximum_active_users": config.get("maximum_active_users"),
+                    "active_users": self.test_sessions.active_user_count() if self.test_sessions else 0,
+                    "browser_model_configuration": bool(config.get("allow_browser_model_configuration")),
+                },
+                "research_capacity": capacity,
+            }
+        )
+        return payload
+
+    def _session_payload(self, session: TestAccessSession | None = None) -> dict[str, Any]:
+        session = session or self._current_test_session()
+        config = self.team_test_config or {}
+        return {
+            "authenticated": session is not None,
+            "test_mode": True,
+            "credential_validation": False,
+            "warning": "当前为小型测试访问：账号密码尚未校验，不能替代正式身份认证。",
+            "user": session.public_payload() if session else None,
+            "login_visual": load_runtime_settings().get("runtime", "login_visual"),
+            "capacity": {
+                "maximum_active_users": config.get("maximum_active_users"),
+                "active_users": self.test_sessions.active_user_count() if self.test_sessions else 0,
+                **(self.research_capacity.metrics() if self.research_capacity else {}),
+            },
+        }
+
+    def _login_test_session(self, payload: dict[str, Any]) -> None:
+        if self.test_sessions is None:
+            self._write_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "测试会话服务未启用"})
+            return
+        session = self.test_sessions.login(
+            payload.get("account"),
+            payload.get("password"),
+            bool(payload.get("remember")),
+        )
+        try:
+            self._app_for_session(session)
+        except Exception:
+            self.test_sessions.logout(session.token)
+            raise
+        max_age = self.test_sessions.remaining_seconds(session)
+        cookie = (
+            f"{self._cookie_name()}={session.token}; Path=/; HttpOnly; SameSite=Lax; "
+            f"Max-Age={max_age}"
+        )
+        if bool((self.team_test_config or {}).get("cookie_secure")):
+            cookie += "; Secure"
+        self._write_json(
+            HTTPStatus.OK,
+            self._session_payload(session),
+            headers={"Set-Cookie": cookie},
+        )
+
+    def _logout_test_session(self) -> None:
+        token = self._session_token()
+        if self.test_sessions:
+            self.test_sessions.logout(token)
+        cookie = f"{self._cookie_name()}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+        if bool((self.team_test_config or {}).get("cookie_secure")):
+            cookie += "; Secure"
+        self._write_json(
+            HTTPStatus.OK,
+            {"authenticated": False, "test_mode": True},
+            headers={"Set-Cookie": cookie},
+        )
+
+    def _require_test_session(self) -> TestAccessSession | None:
+        if self.test_sessions is None:
+            return None
+        session = self._current_test_session()
+        if session is None:
+            self._write_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": "测试会话不存在或已过期，请重新进入。", "login_required": True},
+            )
+        return session
+
+    def _current_test_session(self) -> TestAccessSession | None:
+        return self.test_sessions.resolve(self._session_token()) if self.test_sessions else None
+
+    def _session_token(self) -> str | None:
+        raw = self.headers.get("Cookie")
+        if not raw:
+            return None
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw)
+        except Exception:
+            return None
+        value = cookie.get(self._cookie_name())
+        return value.value if value else None
+
+    def _cookie_name(self) -> str:
+        return str((self.team_test_config or {}).get("cookie_name") or "tradingos_test_session")
+
+    def _app_for_session(self, session: TestAccessSession | None) -> ResearchWebApp:
+        if session is None or self.user_apps is None:
+            return self.app
+        return self.user_apps.get(session.user_id)  # type: ignore[return-value]
+
+    def _required_capacity_gate(self) -> ResearchCapacityGate:
+        if self.research_capacity is None:
+            raise RuntimeError("研判容量门禁未初始化")
+        return self.research_capacity
+
+    def _browser_model_configuration_allowed(self) -> bool:
+        return bool((self.team_test_config or {}).get("allow_browser_model_configuration"))
+
+    def _serve_static(self, route: str | None = None) -> None:
         path_map = {
             "/": ("index.html", "text/html; charset=utf-8"),
             "/index.html": ("index.html", "text/html; charset=utf-8"),
             "/styles.css": ("styles.css", "text/css; charset=utf-8"),
             "/app.js": ("app.js", "application/javascript; charset=utf-8"),
         }
-        target = path_map.get(self.path)
+        target = path_map.get(route or self._route_path())
         if target is None:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
@@ -531,7 +888,7 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self._send_security_headers(cache_control="public, max-age=60")
+        self._send_security_headers(cache_control="no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -562,16 +919,36 @@ class TradingDeskHandler(BaseHTTPRequestHandler):
 
 
 def create_server(host: str | None = None, port: int | None = None, memory_dir: str = "data/memory", provider_name: str = "production") -> ThreadingHTTPServer:
-    server_config = load_runtime_settings().get("runtime", "local_server")
+    settings = load_runtime_settings()
+    server_config = settings.get("runtime", "local_server")
+    team_config = settings.get("runtime", "small_team_test")
+    if team_config["enabled"] and team_config["require_production_provider"] and provider_name != "production":
+        raise RuntimeError("小型团队测试服务只允许 production Provider；样例数据仅用于离线回归测试")
     host = host or server_config["host"]
     port = port if port is not None else server_config["port"]
-    snapshot_client = EastmoneyStockSnapshotClient()
-    TradingDeskHandler.app = ResearchWebApp(
-        LocalMemoryStore(memory_dir),
-        workflow=build_production_workflow() if provider_name == "production" else build_sample_workflow(),
-        stock_snapshot_client=snapshot_client,
+    memory_root = Path(memory_dir)
+    memory_root.mkdir(parents=True, exist_ok=True)
+
+    def build_app(root: Path) -> ResearchWebApp:
+        return ResearchWebApp(
+            LocalMemoryStore(root),
+            workflow=build_production_workflow() if provider_name == "production" else build_sample_workflow(),
+            stock_snapshot_client=EastmoneyStockSnapshotClient(),
+            quote_cache=VerifiedDatasetCache(),
+        )
+
+    TradingDeskHandler.app = build_app(memory_root / "_system")
+    TradingDeskHandler.user_apps = UserResearchAppPool(memory_root, build_app)
+    TradingDeskHandler.test_sessions = TestAccessSessionRegistry(
+        int(team_config["maximum_active_users"]),
+        int(team_config["session_ttl_hours"]) * 60 * 60,
+        int(team_config["remember_session_days"]) * 24 * 60 * 60,
     )
-    return ThreadingHTTPServer((host, port), TradingDeskHandler)
+    TradingDeskHandler.research_capacity = ResearchCapacityGate(
+        int(team_config["maximum_concurrent_research_jobs"])
+    )
+    TradingDeskHandler.team_test_config = dict(team_config)
+    return ExclusiveThreadingHTTPServer((host, port), TradingDeskHandler)
 
 
 def _build_sector_radar_fallback(provider: object) -> TushareIndustryRadarFallback | None:
@@ -588,7 +965,16 @@ def main() -> None:
     parser.add_argument("--memory-dir", default="data/memory")
     parser.add_argument("--provider", choices=["production", "sample"], default="production")
     args = parser.parse_args()
-    server = create_server(args.host, args.port, args.memory_dir, args.provider)
+    try:
+        server = create_server(args.host, args.port, args.memory_dir, args.provider)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048:
+            selected_port = args.port if args.port is not None else "配置端口"
+            raise SystemExit(
+                f"启动失败：端口 {selected_port} 已被其他进程占用。"
+                "请先关闭旧的 TradingAgentsChina 实例，避免新旧后端随机响应。"
+            ) from exc
+        raise
     actual_host, actual_port = server.server_address[:2]
     if actual_host in {"0.0.0.0", "::"}:
         print(f"TradingAgentsChina is running locally at http://127.0.0.1:{actual_port}")
@@ -669,6 +1055,27 @@ def _optional_float(value: Any) -> float | None:
 
 def _optional_int(value: Any) -> int | None:
     return int(value) if value is not None else None
+
+
+def _usable_current_quote(quote: RealtimeQuote) -> bool:
+    return quote_is_usable(quote)
+
+
+def _unavailable_realtime_quote(symbol: str) -> RealtimeQuote:
+    return RealtimeQuote(
+        symbol=symbol,
+        name=None,
+        price=None,
+        previous_close=None,
+        change_pct=None,
+        volume=None,
+        amount=None,
+        trade_date=None,
+        trade_time=None,
+        source="unavailable",
+        data_status="unavailable",
+        error="No current-day quote was returned by the configured real-time providers.",
+    )
 
 
 if __name__ == "__main__":

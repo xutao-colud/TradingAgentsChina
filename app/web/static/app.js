@@ -1,8 +1,13 @@
 const state = {
   lastSymbol: "600519", committee: null, modelProviders: [], activeProviderId: null,
+  session: null, teamHealth: null,
   analysisProgressTimer: null, analysisStartedAt: null,
-  tickerTimer: null, tickerInFlight: false, tickerTrackedCount: 0,
-  tickerConfig: { refresh_interval_ms: null, error_backoff_ms: null, animation_duration_ms: null },
+  tickerTimer: null, tickerInFlight: false, tickerTrackedCount: 0, marketRefreshInFlight: false,
+  loginVisual: { back_messages: [], back_message_palette: [] },
+  tickerConfig: {
+    refresh_interval_ms: null, error_backoff_ms: null, animation_duration_ms: null,
+    request_timeout_ms: null, request_max_attempts: 1, request_retry_backoff_ms: 0,
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -11,14 +16,414 @@ function setToday() {
   $("analysisDate").value = new Date().toISOString().slice(0, 10);
 }
 
-async function api(path, options = {}) {
-  const response = await fetch(path, options);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "请求失败");
-  return { data, response };
+async function api(path, options = {}, requestPolicy = {}) {
+  const maximumAttempts = Math.max(1, Number(requestPolicy.maxAttempts || 1));
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutMs = Number(requestPolicy.timeoutMs || 0);
+    const timeout = timeoutMs > 0 ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const response = await fetch(path, { ...options, signal: controller.signal });
+      const raw = await response.text();
+      let data = {};
+      try { data = raw ? JSON.parse(raw) : {}; }
+      catch { throw new Error(`服务返回了无法解析的数据（HTTP ${response.status}）`); }
+      if (!response.ok) {
+        const legacyRoute = response.status === 404 && data.error === "Unknown API route";
+        const error = new Error(legacyRoute
+          ? "后端服务仍是旧版本，请重启项目后刷新页面。"
+          : (data.error || `请求失败（HTTP ${response.status}）`));
+        error.retryable = response.status >= 500;
+        error.serviceVersionMismatch = legacyRoute;
+        error.loginRequired = response.status === 401 && data.login_required === true;
+        if (error.loginRequired) showLoginView();
+        throw error;
+      }
+      return { data, response };
+    } catch (error) {
+      const retryable = error.name !== "AbortError" && (error instanceof TypeError || error.retryable);
+      if (!retryable || attempt >= maximumAttempts) {
+        if (error.name === "AbortError") throw new Error(`请求超过 ${Math.round(timeoutMs / 1000)} 秒，已停止等待`);
+        if (error instanceof TypeError) throw new Error("本地服务连接中断，请确认服务仍在运行");
+        throw error;
+      }
+      const backoffMs = Math.max(0, Number(requestPolicy.retryBackoffMs || 0)) * attempt;
+      if (backoffMs > 0) await new Promise((resolve) => window.setTimeout(resolve, backoffMs));
+    } finally {
+      if (timeout != null) window.clearTimeout(timeout);
+    }
+  }
+  throw new Error("请求未完成");
 }
 
 function text(element, value) { element.textContent = value ?? "—"; }
+
+function renderAccessCapacity(payload = {}) {
+  const capacity = payload.capacity || {};
+  const active = Number(capacity.active_users || 0);
+  const maximum = Number(capacity.maximum_active_users || 0);
+  const loginCapacity = $("loginCapacity");
+  if (loginCapacity) {
+    loginCapacity.replaceChildren();
+    const seats = document.createElement("span");
+    const dataMode = document.createElement("span");
+    text(seats, maximum > 0 ? `测试席位 ${active}/${maximum}` : "测试席位读取中");
+    text(dataMode, "仅生产数据 / 核验缓存");
+    loginCapacity.append(seats, dataMode);
+  }
+}
+
+function configureLoginVisual(payload = {}) {
+  const visual = payload.login_visual || {};
+  const messages = Array.isArray(visual.back_messages)
+    ? visual.back_messages.filter((message) => typeof message === "string" && message.trim())
+    : [];
+  const palette = Array.isArray(visual.back_message_palette)
+    ? visual.back_message_palette.filter((color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color))
+    : [];
+  state.loginVisual = { back_messages: messages, back_message_palette: palette };
+  document.querySelector(".login-visual")?.dispatchEvent(new CustomEvent("login-visual-config"));
+}
+
+function renderTeamMetrics(health = {}) {
+  state.teamHealth = health;
+  const metrics = health.research_capacity || {};
+  const access = health.test_access || {};
+  text($("sessionUser"), state.session?.user?.display_name || "—");
+  text($("analysisCount"), Number(metrics.analysis_jobs || 0));
+  text($("modelReasoningCount"), Number(metrics.model_explanations || 0));
+  renderAccessCapacity({
+    capacity: {
+      active_users: access.active_users,
+      maximum_active_users: access.maximum_active_users,
+    },
+  });
+}
+
+function showLoginView(sessionPayload = null) {
+  state.session = sessionPayload?.authenticated ? sessionPayload : null;
+  $("loginView").hidden = false;
+  $("appShell").hidden = true;
+  $("committeeModal").hidden = true;
+  document.body.classList.add("login-active");
+  if (state.tickerTimer) window.clearTimeout(state.tickerTimer);
+  state.tickerTimer = null;
+  state.tickerTrackedCount = 0;
+  if (sessionPayload) renderAccessCapacity(sessionPayload);
+  if (sessionPayload) configureLoginVisual(sessionPayload);
+  document.querySelector(".login-visual")?.dispatchEvent(new CustomEvent("login-characters-reset"));
+  window.setTimeout(() => $("loginAccount")?.focus(), 30);
+}
+
+function showAppView(sessionPayload) {
+  document.querySelector(".login-visual")?.dispatchEvent(new CustomEvent("login-characters-suspend"));
+  state.session = sessionPayload;
+  $("loginView").hidden = true;
+  $("appShell").hidden = false;
+  document.body.classList.remove("login-active");
+  text($("sessionUser"), sessionPayload?.user?.display_name || "测试用户");
+}
+
+function initializeLoginCharacters() {
+  const visual = document.querySelector(".login-visual");
+  const stage = $("loginCharacterStage");
+  const account = $("loginAccount");
+  const password = $("loginPassword");
+  const passwordToggle = $("togglePassword");
+  if (!visual || !stage || !account || !password || !passwordToggle) return;
+
+  const characters = [...stage.querySelectorAll("[data-character]")];
+  const motionFactors = [0.72, 0.86, 1, 1.08];
+  const motion = characters.map(() => ({ bodyX: 0, skew: 0, faceX: 0, faceY: 0 }));
+  const pointer = { x: 0, y: 0 };
+  let animationFrame = null;
+  let blinkTimer = null;
+  let blinkReleaseTimer = null;
+  let previousBackMessages = new Set();
+  let backMessageCycle = 0;
+
+  const shuffled = (values) => {
+    const copy = [...values];
+    for (let index = copy.length - 1; index > 0; index -= 1) {
+      const target = Math.floor(Math.random() * (index + 1));
+      [copy[index], copy[target]] = [copy[target], copy[index]];
+    }
+    return copy;
+  };
+
+  const refreshBackMessages = () => {
+    const pool = state.loginVisual.back_messages;
+    const palette = state.loginVisual.back_message_palette;
+    if (pool.length < characters.length || palette.length === 0) return;
+    let candidates = shuffled(pool.filter((message) => !previousBackMessages.has(message)));
+    if (candidates.length < characters.length) candidates = [...candidates, ...shuffled(pool)];
+    const selected = candidates.slice(0, characters.length);
+    previousBackMessages = new Set(selected);
+    characters.forEach((character, index) => {
+      const label = character.querySelector(".character-back b");
+      if (!label) return;
+      text(label, selected[index]);
+      character.style.setProperty("--back-accent", palette[(backMessageCycle + index) % palette.length]);
+      character.style.setProperty("--back-tilt", `${[-1.4, .8, -.6, 1.2][index] || 0}deg`);
+      label.classList.remove("is-message-fresh");
+      window.requestAnimationFrame(() => label.classList.add("is-message-fresh"));
+    });
+    backMessageCycle += 1;
+  };
+
+  const interactionPose = (index) => {
+    const passwordPrivate = visual.classList.contains("is-password-private");
+    const passwordVisible = visual.classList.contains("is-password-visible");
+    if (passwordPrivate) {
+      return [
+        { bodyX: -3, skew: -1.1, faceX: 0, faceY: 0 },
+        { bodyX: -2, skew: -.7, faceX: 0, faceY: 0 },
+        { bodyX: 2, skew: .7, faceX: 0, faceY: 0 },
+        { bodyX: 3, skew: 1.1, faceX: 0, faceY: 0 },
+      ][index];
+    }
+    if (passwordVisible) {
+      return [
+        { bodyX: -1, skew: -.5, faceX: 0, faceY: 0 },
+        { bodyX: -1, skew: -.35, faceX: 0, faceY: 0 },
+        { bodyX: 1, skew: .35, faceX: 0, faceY: 0 },
+        { bodyX: 1, skew: .5, faceX: 0, faceY: 0 },
+      ][index];
+    }
+    if (visual.classList.contains("is-typing")) {
+      return [
+        { bodyX: 1, skew: 0.4, faceX: 2, faceY: 0 },
+        { bodyX: 1, skew: 0.6, faceX: 2, faceY: 0 },
+        { bodyX: 1, skew: 0.5, faceX: 2, faceY: 0 },
+        { bodyX: 2, skew: 0.7, faceX: 2, faceY: 0 },
+      ][index];
+    }
+    return { bodyX: 0, skew: 0, faceX: 0, faceY: 0 };
+  };
+
+  const renderMotion = () => {
+    if ($("loginView").hidden || document.hidden) {
+      animationFrame = null;
+      return;
+    }
+    let unsettled = false;
+    characters.forEach((character, index) => {
+      const factor = motionFactors[index] || 1;
+      const pose = interactionPose(index);
+      const pointerWeight = visual.classList.contains("is-password-private") ? 0 : 1;
+      const target = {
+        bodyX: pointer.x * 7 * factor * pointerWeight + pose.bodyX,
+        skew: -pointer.x * 3.1 * factor * pointerWeight + pose.skew,
+        faceX: pointer.x * 9 * pointerWeight + pose.faceX,
+        faceY: pointer.y * 5.2 * pointerWeight + pose.faceY,
+      };
+      Object.keys(target).forEach((key) => {
+        const delta = target[key] - motion[index][key];
+        motion[index][key] += delta * 0.105;
+        if (Math.abs(delta) > 0.02) unsettled = true;
+      });
+      character.style.setProperty("--body-x", `${motion[index].bodyX.toFixed(2)}px`);
+      character.style.setProperty("--body-skew", `${motion[index].skew.toFixed(2)}deg`);
+      character.style.setProperty("--face-x", `${motion[index].faceX.toFixed(2)}px`);
+      character.style.setProperty("--face-y", `${motion[index].faceY.toFixed(2)}px`);
+    });
+    stage.style.setProperty("--look-x", `${(pointer.x * 3.8).toFixed(2)}px`);
+    stage.style.setProperty("--look-y", `${(pointer.y * 2.8).toFixed(2)}px`);
+    animationFrame = unsettled ? window.requestAnimationFrame(renderMotion) : null;
+  };
+
+  const requestMotionFrame = () => {
+    if ($("loginView").hidden || document.hidden) return;
+    if (animationFrame == null) animationFrame = window.requestAnimationFrame(renderMotion);
+  };
+
+  const updatePointer = (event) => {
+    pointer.x = Math.max(-1, Math.min(1, (event.clientX / window.innerWidth) * 2 - 1));
+    pointer.y = Math.max(-1, Math.min(1, (event.clientY / window.innerHeight) * 2 - 1));
+    requestMotionFrame();
+  };
+
+  const syncPrivacyState = () => {
+    const wasPrivate = visual.classList.contains("is-password-private");
+    const concealingPassword = password.type === "password"
+      && (document.activeElement === password || password.value.length > 0);
+    visual.classList.toggle("is-password-private", concealingPassword);
+    if (concealingPassword && !wasPrivate) refreshBackMessages();
+  };
+  const syncFocusState = () => {
+    const focused = document.activeElement === account || document.activeElement === password;
+    visual.classList.toggle("is-typing", focused);
+    visual.classList.toggle("is-password-focus", document.activeElement === password);
+    syncPrivacyState();
+    requestMotionFrame();
+  };
+  const syncPasswordState = () => {
+    visual.classList.toggle("has-password", password.value.length > 0);
+    visual.classList.toggle("is-password-visible", password.type === "text" && password.value.length > 0);
+    syncPrivacyState();
+    requestMotionFrame();
+  };
+
+  password.type = "password";
+  passwordToggle.setAttribute("aria-pressed", "false");
+  passwordToggle.setAttribute("aria-label", "显示密码");
+  window.addEventListener("pointermove", updatePointer, { passive: true });
+  [account, password].forEach((input) => {
+    input.addEventListener("focus", syncFocusState);
+    input.addEventListener("blur", () => window.setTimeout(syncFocusState, 0));
+  });
+  password.addEventListener("input", syncPasswordState);
+  visual.addEventListener("login-password-visibility", syncPasswordState);
+  visual.addEventListener("login-visual-config", refreshBackMessages);
+
+  const clearBlink = () => {
+    if (blinkTimer != null) window.clearTimeout(blinkTimer);
+    if (blinkReleaseTimer != null) window.clearTimeout(blinkReleaseTimer);
+    blinkTimer = null;
+    blinkReleaseTimer = null;
+    characters.forEach((character) => character.classList.remove("is-blinking"));
+  };
+
+  const scheduleBlink = () => {
+    clearBlink();
+    if ($("loginView").hidden || document.hidden) return;
+    const delay = 2400 + Math.random() * 3600;
+    blinkTimer = window.setTimeout(() => {
+      blinkTimer = null;
+      if (!visual.classList.contains("is-password-visible") && characters.length) {
+        const character = characters[Math.floor(Math.random() * characters.length)];
+        character.classList.add("is-blinking");
+        blinkReleaseTimer = window.setTimeout(() => {
+          character.classList.remove("is-blinking");
+          blinkReleaseTimer = null;
+          scheduleBlink();
+        }, 150);
+      } else {
+        scheduleBlink();
+      }
+    }, delay);
+  };
+
+  const suspendCharacters = () => {
+    if (animationFrame != null) window.cancelAnimationFrame(animationFrame);
+    animationFrame = null;
+    clearBlink();
+  };
+
+  const resumeCharacters = ({ resetPassword = false } = {}) => {
+    suspendCharacters();
+    if (resetPassword) {
+      password.type = "password";
+      passwordToggle.setAttribute("aria-pressed", "false");
+      passwordToggle.setAttribute("aria-label", "显示密码");
+    }
+    syncFocusState();
+    syncPasswordState();
+    requestMotionFrame();
+    scheduleBlink();
+  };
+
+  visual.addEventListener("login-characters-suspend", suspendCharacters);
+  visual.addEventListener("login-characters-reset", () => resumeCharacters({ resetPassword: true }));
+  window.addEventListener("pageshow", () => {
+    if (!$("loginView").hidden) resumeCharacters();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) suspendCharacters();
+    else if (!$("loginView").hidden) resumeCharacters();
+  });
+
+  syncPasswordState();
+  scheduleBlink();
+}
+
+function applyModelConfigurationPolicy(health) {
+  const allowed = health?.test_access?.browser_model_configuration === true;
+  ["modelProvider", "modelName", "modelKey", "clearModelKey"].forEach((id) => {
+    const element = $(id);
+    if (element) element.disabled = !allowed;
+  });
+  const submit = $("modelForm")?.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = !allowed;
+  if (!allowed) {
+    text($("modelStatus"), "团队测试模式由服务器环境变量统一配置模型与密钥；页面不接收或保存 API Key。");
+  }
+}
+
+function appendModelInlineContent(element, value) {
+  const pattern = /(\*\*[^*\n]+\*\*|【[^】\n]+】)/g;
+  const content = String(value ?? "");
+  let cursor = 0;
+  for (const match of content.matchAll(pattern)) {
+    if (match.index > cursor) element.append(document.createTextNode(content.slice(cursor, match.index)));
+    const token = match[0];
+    const part = document.createElement(token.startsWith("**") ? "strong" : "cite");
+    if (token.startsWith("**")) {
+      text(part, token.slice(2, -2));
+    } else {
+      part.className = "model-citation";
+      text(part, token);
+    }
+    element.append(part);
+    cursor = match.index + token.length;
+  }
+  if (cursor < content.length) element.append(document.createTextNode(content.slice(cursor)));
+}
+
+function renderModelInterpretation(value) {
+  const root = $("modelInterpretation");
+  root.replaceChildren();
+  const lines = String(value || "").replace(/\r\n?/g, "\n").split("\n");
+  let list = null;
+  let listType = null;
+  const closeList = () => { list = null; listType = null; };
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line || line === "<!-- TRADINGOS_EXPLANATION_COMPLETE -->") {
+      closeList();
+      return;
+    }
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) {
+      closeList();
+      const section = document.createElement("h5");
+      appendModelInlineContent(section, heading[1]);
+      root.append(section);
+      return;
+    }
+    const bullet = line.match(/^(?:[-*+]\s+)(.+)$/);
+    const numbered = line.match(/^(?:\d+[.)、]\s*)(.+)$/);
+    if (bullet || numbered) {
+      const desiredType = numbered ? "ol" : "ul";
+      if (!list || listType !== desiredType) {
+        list = document.createElement(desiredType);
+        listType = desiredType;
+        root.append(list);
+      }
+      const item = document.createElement("li");
+      appendModelInlineContent(item, (bullet || numbered)[1]);
+      list.append(item);
+      return;
+    }
+    closeList();
+    const paragraph = document.createElement("p");
+    appendModelInlineContent(paragraph, line);
+    root.append(paragraph);
+  });
+}
+
+function stockSymbolInput(value) {
+  const symbol = value
+    .normalize("NFKC")
+    .replace(/[\s\u200B\u200C\u200D\u2060\uFEFF]+/g, "")
+    .toUpperCase();
+  const match = symbol.match(/^(\d{6})(?:\.?([A-Z]{2}))?$/);
+  if (!match) {
+    throw new Error("股票代码格式无效：请输入6位数字，例如 600519 或 301526.SZ。");
+  }
+  return match[2] ? `${match[1]}.${match[2]}` : match[1];
+}
 
 function renderProfile(profile) {
   const root = $("profileContent");
@@ -154,6 +559,17 @@ function money(value) { return value == null ? "—" : new Intl.NumberFormat("zh
 function percentage(value) { return value == null ? "—" : `${value >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`; }
 function yi(value) { return value == null ? "—" : `${(Number(value) / 100000000).toFixed(2)}亿`; }
 function shares(value) { return value == null ? "—" : new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value); }
+function quoteStatusLabel(status) { return status === "real_time" ? "实时" : status === "latest_available" ? "最近交易日收盘" : "不可用"; }
+
+function hasUsableQuote(item) {
+  const quote = item?.quote;
+  return (
+    (quote?.data_status === "real_time" || quote?.data_status === "latest_available")
+    && Number.isFinite(Number(quote?.price))
+    && Number(quote.price) > 0
+    && Boolean(quote?.trade_date)
+  );
+}
 
 function watchRow(item, openDetail = false) {
   const row = document.createElement("div"); row.className = "watch-row";
@@ -165,14 +581,20 @@ function watchRow(item, openDetail = false) {
   const quote = item.quote;
   if (!snapshot?.name && quote?.name) text(symbol, `${item.symbol} · ${quote.name}`);
   const price = document.createElement("b"); const meta = document.createElement("small");
-  if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quote.data_status} · ${quote.trade_date || ""}`); }
+  if (quote?.data_status === "real_time" || quote?.data_status === "latest_available") { text(price, quote.price?.toFixed(2)); price.className = quote.change_pct >= 0 ? "up" : "down"; text(meta, `${percentage(quote.change_pct)} · ${quoteStatusLabel(quote.data_status)} · ${quote.trade_date || ""}`); }
   else { text(price, "行情不可用"); price.className = "flat"; text(meta, quote?.error || "请刷新后重试"); }
   const advice = document.createElement("p"); text(advice, item.advice || "点击刷新实时行情以获取研究提示。");
   initializeRollingPrice(price, quote);
   price.classList.add("watch-live-price"); meta.dataset.role = "quote-meta";
   row.append(main, price, meta);
   if (snapshot) row.append(watchDetail(snapshot, openDetail));
-  row.append(advice); return row;
+  const actions = document.createElement("div"); actions.className = "watch-actions";
+  const remove = document.createElement("button"); remove.type = "button"; remove.className = "watch-remove-button";
+  remove.setAttribute("aria-label", `将 ${item.symbol} 移出自选股`);
+  text(remove, "移出自选");
+  remove.addEventListener("click", () => deleteWatchlistItem(item.symbol, remove));
+  actions.append(remove);
+  row.append(advice, actions); return row;
 }
 
 function watchDetail(snapshot, openDetail = false) {
@@ -214,6 +636,33 @@ function watchDetail(snapshot, openDetail = false) {
 }
 
 function renderWatchlist(items) { const root = $("watchlistRows"); root.replaceChildren(); if (!items.length) { const empty = document.createElement("div"); empty.className = "empty-state compact"; text(empty, "尚未加入自选股。"); root.append(empty); return; } items.forEach((item) => root.append(watchRow(item, items.length === 1))); }
+
+async function deleteWatchlistItem(symbol, button) {
+  if (!window.confirm(`将 ${symbol} 移出自选股？持仓、研判记录和复盘数据不会被删除。`)) return;
+  button.disabled = true; text(button, "正在移出…");
+  try {
+    const { data } = await api(
+      "/api/watchlist/remove",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol }),
+      },
+    );
+    if ((data.items || []).some((item) => item.symbol === symbol)) {
+      throw new Error("服务端未确认删除，请稍后重试");
+    }
+    Array.from(document.querySelectorAll(".watch-row[data-symbol]"))
+      .filter((row) => row.dataset.symbol === symbol)
+      .forEach((row) => row.remove());
+    if (!$("watchlistRows").querySelector(".watch-row")) renderWatchlist([]);
+    syncTickerTrackingFromDom();
+    text($("marketMessage"), `${symbol} 已移出自选股；持仓和历史研判保持不变。`);
+  } catch (error) {
+    button.disabled = false; text(button, "移出自选");
+    text($("marketMessage"), `移出自选失败：${error.message}`);
+  }
+}
 
 function renderPortfolio(snapshot) {
   const root = $("accountStats"); root.replaceChildren();
@@ -274,9 +723,43 @@ async function deletePosition(symbol) {
 }
 
 async function refreshMarket() {
+  if (state.marketRefreshInFlight) return;
+  state.marketRefreshInFlight = true;
+  if (state.tickerTimer) window.clearTimeout(state.tickerTimer);
   const button = $("refreshMarket"); button.disabled = true; text($("marketMessage"), "正在请求固定公开行情源…");
-  try { const { data } = await api("/api/market/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); renderWatchlist(data.watchlist); renderPortfolio(data.portfolio); text($("marketMessage"), "已刷新。请注意行情源状态与时间戳；建议仅作研究依据。"); }
-  catch (error) { text($("marketMessage"), `刷新失败：${error.message}`); } finally { button.disabled = false; }
+  const requestPolicy = {
+    timeoutMs: state.tickerConfig.request_timeout_ms,
+    maxAttempts: state.tickerConfig.request_max_attempts,
+    retryBackoffMs: state.tickerConfig.request_retry_backoff_ms,
+  };
+  try {
+    const { data } = await api(
+      "/api/market/refresh",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      requestPolicy,
+    );
+    const watchlist = data.watchlist || [];
+    const keepPreviousSnapshot = (
+      watchlist.length > 0
+      && !watchlist.some(hasUsableQuote)
+      && Boolean($("watchlistRows").querySelector(".watch-row"))
+    );
+    if (!keepPreviousSnapshot) {
+      renderWatchlist(watchlist);
+      renderPortfolio(data.portfolio);
+    }
+    const cacheNote = Number(data.cache_replay_count || 0) > 0
+      ? `；${data.cache_replay_count} 只股票回放完整性校验通过的最近交易日快照，未标记为实时`
+      : "";
+    const retainedNote = keepPreviousSnapshot
+      ? "；本轮未取得可核验的新快照，页面保留上次已显示结果"
+      : "";
+    text($("marketMessage"), `已刷新 · ${data.source}${cacheNote}${retainedNote}。请核对行情日期与时间。`);
+  } catch (error) {
+    text($("marketMessage"), `刷新未完成：${error.message}；页面保留上次结果并将自动重试。`);
+  } finally {
+    state.marketRefreshInFlight = false; button.disabled = false; scheduleTicker();
+  }
 }
 
 function initializeRollingPrice(element, quote) {
@@ -323,14 +806,19 @@ function scheduleTicker(delay = null) {
 }
 
 async function refreshTicker() {
-  if (state.tickerInFlight || document.hidden) { scheduleTicker(); return; }
+  if (state.tickerInFlight || state.marketRefreshInFlight || document.hidden) { scheduleTicker(); return; }
   state.tickerInFlight = true; setTickerStatus("正在同步轻量报价", "loading");
   try {
     const { data } = await api("/api/market/ticker", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     state.tickerTrackedCount = Number(data.tracked_count || 0);
     if (state.tickerTrackedCount < 1) { setTickerStatus("加入自选或持仓后自动报价", "paused"); return; }
     updateTrackedQuotes(data.quotes || {}); updatePortfolioTicker(data.portfolio);
-    setTickerStatus(data.source === "unavailable" ? "报价源暂不可用，自动重试" : `${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒自动报价 · ${data.source}`, data.source === "unavailable" ? "error" : "live");
+    const tickerMessage = data.source === "unavailable"
+      ? "实时源暂不可用，未使用历史收盘价冒充当前价；正在自动重试"
+      : data.live_session
+        ? `${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒实时更新 · ${data.source}`
+        : `最近交易日收盘价 · ${data.source} · ${Math.round(Number(data.refresh_interval_ms) / 1000)} 秒校验`;
+    setTickerStatus(tickerMessage, data.source === "unavailable" ? "error" : data.live_session ? "live" : "paused");
     scheduleTicker(data.source === "unavailable" ? state.tickerConfig.error_backoff_ms : data.refresh_interval_ms);
   } catch (error) {
     setTickerStatus(`自动报价失败：${error.message}`, "error"); scheduleTicker(state.tickerConfig.error_backoff_ms);
@@ -344,7 +832,7 @@ function updateTrackedQuotes(quotes) {
     animateRollingPrice(row.querySelector(".watch-live-price"), quote);
     const name = row.querySelector("div > strong"); if (name && quote.name) text(name, `${symbol} · ${quote.name}`);
     const meta = row.querySelector('[data-role="quote-meta"]');
-    if (meta) text(meta, `${percentage(quote.change_pct)} · ${quote.data_status || "未知"} · ${quote.trade_date || ""} ${quote.trade_time || ""}`);
+    if (meta) text(meta, `${percentage(quote.change_pct)} · ${quoteStatusLabel(quote.data_status)} · ${quote.trade_date || ""} ${quote.trade_time || ""}`);
   });
 }
 
@@ -443,6 +931,7 @@ function renderReport(report) {
   text($("verdict"), report.conclusion); $("verdict").dataset.risk = report.risk_level;
   const scores = $("scores"); scores.replaceChildren();
   [["基本", report.fundamental_score], ["技术", report.technical_score], ["资金", report.capital_flow_score], ["题材", report.theme_score]].forEach(([label, value]) => scores.append(scoreTile(label, value)));
+  renderDecisionBrief(report.decision_brief);
   text($("actionPlan"), report.action_plan);
   const risks = $("risks"); risks.replaceChildren(); (report.risk_factors || []).slice(0, 4).forEach((risk) => { const li = document.createElement("li"); text(li, risk); risks.append(li); });
   const skills = $("skills"); skills.replaceChildren(); (report.skill_insights || []).filter((skill) => !["next_session_scenario", "price_observation_zones"].includes(skill.details?.mode)).forEach((skill) => {
@@ -463,7 +952,83 @@ function renderReport(report) {
   const model = $("modelSection"); model.hidden = !report.model_interpretation;
   const execution = report.model_execution;
   text($("modelInterpretationTitle"), execution ? `${execution.provider_name} · ${execution.model} 解释` : "模型解释");
-  text($("modelInterpretation"), report.model_interpretation);
+  renderModelInterpretation(report.model_interpretation);
+}
+
+function renderDecisionBrief(brief) {
+  const root = $("decisionBrief");
+  root.replaceChildren();
+  root.hidden = !brief || typeof brief !== "object";
+  if (root.hidden) return;
+
+  const boundary = brief.data_boundary || {};
+  const head = document.createElement("div"); head.className = "evidence-brief__head";
+  const heading = document.createElement("div");
+  const eyebrow = document.createElement("span"); eyebrow.className = "evidence-brief__eyebrow"; text(eyebrow, "EVIDENCE BRIEF");
+  const title = document.createElement("h4"); text(title, brief.headline || "证据裁决简报");
+  const thesis = document.createElement("p"); text(thesis, brief.thesis || "暂无论据摘要。");
+  heading.append(eyebrow, title, thesis);
+  const badge = document.createElement("b"); badge.className = "evidence-brief__badge";
+  text(badge, `${boundary.status || "数据未知"} · ${boundary.traceable_finding_count ?? 0}/${boundary.total_finding_count ?? 0} 可追溯`);
+  head.append(heading, badge); root.append(head);
+
+  const evidenceGrid = document.createElement("div"); evidenceGrid.className = "evidence-claim-grid";
+  const claims = Array.isArray(brief.decisive_evidence) ? brief.decisive_evidence : [];
+  if (!claims.length) evidenceGrid.append(evidenceBriefEmpty("没有具备来源和时间的决定性证据。"));
+  claims.forEach((claim, index) => evidenceGrid.append(renderEvidenceClaim(claim, index)));
+  root.append(evidenceGrid);
+
+  const challengeGrid = document.createElement("div"); challengeGrid.className = "evidence-challenge-grid";
+  challengeGrid.append(
+    evidenceBriefList("最强反证", (brief.strongest_counter_evidence || []).map((item) => `${item.domain}：${item.claim}${item.why_it_matters ? `；${item.why_it_matters}` : ""}`), "暂无可追溯反证。"),
+    evidenceBriefList("失效条件", brief.invalidation_conditions || [], "尚未形成可观察失效条件。"),
+  );
+  root.append(challengeGrid);
+
+  const court = brief.court || {};
+  const profile = brief.profile_fit || {};
+  const synthesis = document.createElement("div"); synthesis.className = "evidence-synthesis";
+  const courtTitle = document.createElement("strong"); text(courtTitle, court.status === "decided" ? `${court.winner || "当前路线"}领先` : "委员会未形成路线优势");
+  const courtMeta = document.createElement("span");
+  text(courtMeta, court.status === "decided" ? `${court.runner_up || "第二路线未知"} · 领先 ${court.score_gap ?? "—"} 分 · ${court.reliability || "可靠性未标注"}` : court.verdict || "证据门禁拒绝比较。");
+  const courtText = document.createElement("p"); text(courtText, court.action || court.verdict || "等待补齐证据。");
+  const profileText = document.createElement("p"); profileText.className = "profile-fit-line"; text(profileText, `画像适配：${profile.conclusion || "未取得用户画像适配结论"}`);
+  synthesis.append(courtTitle, courtMeta, courtText, profileText); root.append(synthesis);
+
+  const gaps = brief.critical_data_gaps || [];
+  if (gaps.length) {
+    const gapPanel = document.createElement("details"); gapPanel.className = "evidence-gaps";
+    const summary = document.createElement("summary"); text(summary, `关键数据缺口 · ${gaps.length} 项（已去重）`);
+    const list = document.createElement("ul");
+    gaps.forEach((gap) => { const li = document.createElement("li"); text(li, `${gap.dataset} · ${gap.status}${gap.as_of ? ` · ${gap.as_of}` : ""}：${gap.reason}`); list.append(li); });
+    gapPanel.append(summary, list); root.append(gapPanel);
+  }
+}
+
+function renderEvidenceClaim(claim, index) {
+  const card = document.createElement("article"); card.className = `evidence-claim ${claim.direction === "约束" ? "is-caution" : "is-support"}`;
+  const meta = document.createElement("span"); text(meta, `0${index + 1} · ${claim.domain || "未知维度"} · ${claim.direction || "观察"}`);
+  const title = document.createElement("strong"); text(title, claim.claim || "未形成结论");
+  const score = document.createElement("b"); text(score, `${claim.score ?? "—"} 分 · 置信 ${formatConfidence(claim.confidence)}`);
+  const observations = document.createElement("ul");
+  (claim.observations || []).forEach((item) => { const li = document.createElement("li"); text(li, item); observations.append(li); });
+  const sources = document.createElement("p"); sources.className = "evidence-source-line";
+  text(sources, (claim.sources || []).map((source) => `${source.id}｜${source.as_of}｜${source.title}`).join("；") || "无可追溯来源");
+  card.append(meta, title, score, observations, sources); return card;
+}
+
+function evidenceBriefList(titleText, items, emptyText) {
+  const section = document.createElement("section"); const title = document.createElement("h5"); const list = document.createElement("ul");
+  text(title, titleText); (items.length ? items : [emptyText]).forEach((item) => { const li = document.createElement("li"); text(li, item); list.append(li); });
+  section.append(title, list); return section;
+}
+
+function evidenceBriefEmpty(message) {
+  const empty = document.createElement("p"); empty.className = "evidence-brief__empty"; text(empty, message); return empty;
+}
+
+function formatConfidence(value) {
+  const numeric = Number(value); return Number.isFinite(numeric) ? `${Math.round(numeric * 100)}%` : "—";
 }
 
 function renderScenarioPanel(report) {
@@ -490,7 +1055,7 @@ function renderScenarioPanel(report) {
 
 function renderNextSessionCard(insight) {
   const card = document.createElement("article"); card.className = "scenario-card next-session-card";
-  card.append(scenarioCardHead("01", "次日红 / 平 / 绿盘观察"));
+  card.append(scenarioCardHead("01", "同状态历史次日分布"));
   const details = insight?.details || {};
   if (!insight || details.available === false || !Number.isFinite(Number(details.sample_size)) || Number(details.sample_size) < 1) {
     card.append(scenarioEmpty(insight?.conclusion || "没有达到最小历史样本门槛，不显示百分比。"));
@@ -498,7 +1063,7 @@ function renderNextSessionCard(insight) {
   }
   const red = Number(details.red_rate_pct || 0); const flat = Number(details.flat_rate_pct || 0); const green = Number(details.green_rate_pct || 0);
   const values = document.createElement("div"); values.className = "scenario-rates";
-  values.append(rateBlock("红盘观察", red, "up"), rateBlock("平盘观察", flat, "flat"), rateBlock("绿盘观察", green, "down"));
+  values.append(rateBlock("历史红盘频率", red, "up"), rateBlock("历史平盘频率", flat, "flat"), rateBlock("历史绿盘频率", green, "down"));
   const bar = document.createElement("div"); bar.className = "scenario-distribution"; bar.setAttribute("role", "img");
   bar.setAttribute("aria-label", `历史样本中红盘 ${red.toFixed(1)}%，平盘 ${flat.toFixed(1)}%，绿盘 ${green.toFixed(1)}%`);
   [["up", red], ["flat", flat], ["down", green]].forEach(([kind, value]) => {
@@ -506,9 +1071,11 @@ function renderNextSessionCard(insight) {
   });
   const meta = document.createElement("p"); meta.className = "scenario-meta";
   text(meta, `${insight.stage} · n=${details.sample_size} · ${details.sample_start || "—"} 至 ${details.sample_end || "—"} · 来源 ${formatSourceIds(details.source_ids)}`);
+  const audit = document.createElement("p"); audit.className = "scenario-meta";
+  text(audit, `计数 红/平/绿=${details.red_count}/${details.flat_count}/${details.green_count} · 平盘阈值 ±${Number(details.flat_band_pct || 0).toFixed(2)}% · 红盘 Wilson 区间 ${formatPercentInterval(details.red_wilson_interval_pct)}`);
   const note = document.createElement("p"); note.className = "scenario-caveat";
-  text(note, details.sample_mode === "baseline" ? "相似状态样本未达门槛，当前展示全样本基准，不能形成方向性结论。" : "仅表示相同状态在历史样本中的结果分布，不代表明日发生概率。");
-  card.append(values, bar, meta, note); return card;
+  text(note, "仅表示相同状态在历史样本中的结果分布，不代表明日发生概率；未收盘日线不会参与统计。");
+  card.append(values, bar, meta, audit, note); return card;
 }
 
 function renderPriceZoneCard(insight) {
@@ -550,6 +1117,11 @@ function rateBlock(label, value, kind) {
   const block = document.createElement("div"); block.className = `scenario-rate ${kind}`;
   const name = document.createElement("span"); text(name, label);
   const number = document.createElement("strong"); text(number, `${Number(value).toFixed(1)}%`); block.append(name, number); return block;
+}
+
+function formatPercentInterval(interval) {
+  return Array.isArray(interval) && interval.length === 2 && interval.every((item) => Number.isFinite(Number(item)))
+    ? `${Number(interval[0]).toFixed(1)}%–${Number(interval[1]).toFixed(1)}%` : "不可用";
 }
 
 function zoneBlock(label, zone, kind) {
@@ -636,7 +1208,7 @@ function renderCommitteeCourt(details) {
   const root = $("committeeFactions");
   if (!judgeBox || !root) return;
   judgeBox.replaceChildren();
-  const title = document.createElement("strong"); text(title, `Judge 裁决：${judge.winner || "暂无优势"}`);
+  const title = document.createElement("strong"); text(title, `${judge.role_label || "主审判官"}裁决：${judge.winner || "暂无优势"}`);
   const topic = document.createElement("em"); text(topic, `研讨问题：${judge.discussion_topic || "当前个股是否值得继续研究"}`);
   const meta = document.createElement("span"); text(meta, `${judge.winner_route || "—"} · 可靠性 ${judge.reliability || "—"} · 领先 ${judge.score_gap ?? "—"} 分`);
   const method = document.createElement("span"); text(method, judge.score_summary ? `${judge.score_summary}｜${judge.score_method || ""}` : judge.score_method || "");
@@ -735,15 +1307,76 @@ async function loadDashboard() {
   try {
     const [{ data: health }, { data: profile }, { data: tools }, { data: playbooks }, { data: watchlist }, { data: portfolio }, { data: models }] = await Promise.all([api("/api/health"), api("/api/profile"), api("/api/tools"), api("/api/playbooks"), api("/api/watchlist"), api("/api/portfolio"), api("/api/models")]);
     configureTicker(health.realtime_ticker);
-    text($("serverStatus"), `本地引擎已就绪 · ${health.data_provider}`); renderProfile(profile); renderTools(tools.tools); renderPlaybooks(playbooks); renderWatchlist(watchlist.items); renderPortfolio(portfolio); renderModels(models);
+    text($("serverStatus"), `${health.real_data_only ? "真实数据门禁" : "研究引擎"}已就绪 · ${health.data_provider}`);
+    renderProfile(profile); renderTools(tools.tools); renderPlaybooks(playbooks); renderWatchlist(watchlist.items); renderPortfolio(portfolio); renderModels(models); renderTeamMetrics(health); applyModelConfigurationPolicy(health);
   } catch (error) { text($("serverStatus"), `连接失败：${error.message}`); }
 }
+
+$("loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = $("loginButton");
+  button.disabled = true;
+  text($("loginMessage"), "正在建立独立测试档案…");
+  try {
+    const { data } = await api("/api/session/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        account: $("loginAccount").value.trim(),
+        password: $("loginPassword").value,
+        remember: $("rememberSession").checked,
+      }),
+    });
+    $("loginPassword").value = "";
+    document.querySelector(".login-visual")?.dispatchEvent(new CustomEvent("login-password-visibility"));
+    text($("loginMessage"), "");
+    showAppView(data);
+    await loadDashboard();
+  } catch (error) {
+    text($("loginMessage"), error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("togglePassword").addEventListener("click", () => {
+  const input = $("loginPassword");
+  const button = $("togglePassword");
+  const reveal = input.type === "password";
+  input.type = reveal ? "text" : "password";
+  button.setAttribute("aria-pressed", String(reveal));
+  button.setAttribute("aria-label", reveal ? "隐藏密码" : "显示密码");
+  document.querySelector(".login-visual")?.dispatchEvent(new CustomEvent("login-password-visibility"));
+  input.focus();
+});
+
+$("logoutButton").addEventListener("click", async () => {
+  const button = $("logoutButton");
+  button.disabled = true;
+  try {
+    const { data } = await api("/api/session/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    showLoginView(data);
+    text($("loginMessage"), "已退出当前测试档案。");
+    try {
+      const { data: status } = await api("/api/session");
+      renderAccessCapacity(status);
+    } catch {}
+  } catch (error) {
+    text($("serverStatus"), `退出失败：${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("analysisForm").addEventListener("submit", async (event) => {
   event.preventDefault(); const button = $("analyzeButton"); button.disabled = true; setAnalyzeButton(true); text($("formMessage"), "正在运行市场、技术、资金、风险与个人画像 Skills…");
   let payload;
   try {
-    payload = { symbol: $("symbol").value.trim(), analysis_date: $("analysisDate").value, question: $("question").value.trim(), model_explain: $("modelExplain").checked, include_realtime: true };
+    payload = { symbol: stockSymbolInput($("symbol").value), analysis_date: $("analysisDate").value, question: $("question").value.trim(), model_explain: $("modelExplain").checked, include_realtime: true };
     if (payload.model_explain) {
       payload.model_provider_id = $("modelProvider").value;
       payload.model_name = $("modelName").value.trim();
@@ -794,8 +1427,8 @@ $("closeCommittee").addEventListener("click", closeCommittee);
 $("committeeModal").addEventListener("click", (event) => { if (event.target === $("committeeModal")) closeCommittee(); });
 
 $("watchlistForm").addEventListener("submit", async (event) => {
-  event.preventDefault(); const symbol = $("watchSymbol").value.trim(); if (!symbol) return;
-  try { const { data } = await api("/api/watchlist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol, note: $("watchNote").value.trim() }) }); renderWatchlist(data.items); $("watchSymbol").value = ""; $("watchNote").value = ""; text($("marketMessage"), "已加入自选；点击刷新获取实时行情。"); }
+  event.preventDefault();
+  try { const symbol = stockSymbolInput($("watchSymbol").value); const { data } = await api("/api/watchlist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol, note: $("watchNote").value.trim() }) }); renderWatchlist(data.items); $("watchSymbol").value = ""; $("watchNote").value = ""; text($("marketMessage"), "已加入自选；点击刷新获取实时行情。"); }
   catch (error) { text($("marketMessage"), error.message); }
 });
 
@@ -804,7 +1437,7 @@ $("cashForm").addEventListener("submit", async (event) => {
 });
 
 $("positionForm").addEventListener("submit", async (event) => {
-  event.preventDefault(); try { await api("/api/portfolio/position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: $("positionSymbol").value.trim(), quantity: $("positionQty").value, cost_price: $("positionCost").value }) }); $("positionForm").reset(); await refreshMarket(); text($("marketMessage"), "持仓已保存并刷新估值。"); } catch (error) { text($("marketMessage"), error.message); }
+  event.preventDefault(); try { await api("/api/portfolio/position", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ symbol: stockSymbolInput($("positionSymbol").value), quantity: $("positionQty").value, cost_price: $("positionCost").value }) }); $("positionForm").reset(); await refreshMarket(); text($("marketMessage"), "持仓已保存并刷新估值。"); } catch (error) { text($("marketMessage"), error.message); }
 });
 
 $("exportButton").addEventListener("click", async () => {
@@ -831,4 +1464,22 @@ function syncTickerTrackingFromDom() {
   const root = $(id); if (root) new MutationObserver(syncTickerTrackingFromDom).observe(root, { childList: true });
 });
 
-setToday(); loadDashboard();
+async function bootstrap() {
+  setToday();
+  try {
+    const { data } = await api("/api/session");
+    renderAccessCapacity(data);
+    if (data.authenticated) {
+      showAppView(data);
+      await loadDashboard();
+    } else {
+      showLoginView(data);
+    }
+  } catch (error) {
+    showLoginView();
+    text($("loginMessage"), `服务连接失败：${error.message}`);
+  }
+}
+
+initializeLoginCharacters();
+bootstrap();

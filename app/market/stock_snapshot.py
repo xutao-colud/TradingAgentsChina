@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -10,9 +8,11 @@ from typing import Callable
 from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 from app.market.realtime import RealtimeQuote
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.network.retry import retry_call
 from app.rules.trading_rules import normalize_symbol
 
@@ -62,6 +62,13 @@ class StockRealtimeSnapshot:
     error: str | None = None
 
     def to_quote(self) -> RealtimeQuote:
+        try:
+            observed_at = datetime.fromisoformat(self.as_of)
+            trade_date = observed_at.date().isoformat()
+            trade_time = observed_at.time().isoformat(timespec="seconds")
+        except ValueError:
+            trade_date = None
+            trade_time = self.as_of
         return RealtimeQuote(
             symbol=self.symbol,
             name=self.name,
@@ -70,8 +77,8 @@ class StockRealtimeSnapshot:
             change_pct=self.change_pct,
             volume=self.volume,
             amount=self.amount,
-            trade_date=self.money_flow.trade_date if self.money_flow else None,
-            trade_time=self.as_of,
+            trade_date=trade_date,
+            trade_time=trade_time,
             source=self.source,
             data_status=self.data_status,
             error=self.error,
@@ -132,6 +139,7 @@ class EastmoneyStockSnapshotClient:
                 source=quote_source,
                 force_latest_available=force_latest,
             )
+            observed_at = datetime.fromisoformat(snapshot.as_of)
             return RealtimeQuote(
                 symbol=normalized,
                 name=snapshot.name,
@@ -140,8 +148,8 @@ class EastmoneyStockSnapshotClient:
                 change_pct=snapshot.change_pct,
                 volume=snapshot.volume,
                 amount=snapshot.amount,
-                trade_date=now.date().isoformat(),
-                trade_time=now.time().isoformat(timespec="seconds"),
+                trade_date=observed_at.date().isoformat(),
+                trade_time=observed_at.time().isoformat(timespec="seconds"),
                 source=quote_source,
                 data_status=snapshot.data_status,
             )
@@ -233,7 +241,7 @@ class EastmoneyStockSnapshotClient:
 def _quote_url(symbol: str) -> str:
     params = {
         "secid": _secid(symbol),
-        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f116,f117,f127,f128,f129,f168,f170",
+        "fields": "f43,f44,f45,f46,f47,f48,f57,f58,f60,f86,f116,f117,f127,f128,f129,f168,f170",
     }
     return load_runtime_settings().get("providers", "eastmoney", "stock_url") + "?" + urlencode(params, safe=",:+")
 
@@ -266,6 +274,7 @@ def _snapshot_from_data(
     source: str = "eastmoney_push2",
     force_latest_available: bool = False,
 ) -> StockRealtimeSnapshot:
+    observed_at = _quote_observed_at(data, now)
     return StockRealtimeSnapshot(
         symbol=symbol,
         name=_normalize_name(_text(data.get("f58"))),
@@ -285,9 +294,9 @@ def _snapshot_from_data(
         region=_text(data.get("f128")),
         concepts=_split_concepts(_text(data.get("f129"))),
         money_flow=flow,
-        as_of=now.isoformat(timespec="seconds"),
+        as_of=observed_at.isoformat(timespec="seconds"),
         source=source,
-        data_status="latest_available" if force_latest_available else _data_status(now),
+        data_status="latest_available" if force_latest_available else _data_status(now, observed_at),
     )
 
 
@@ -339,27 +348,8 @@ def _fetch_text(url: str) -> str:
 
 
 def _fetch_text_with_curl(url: str) -> str:
-    curl = shutil.which("curl")
-    if not curl:
-        raise OSError("curl is unavailable and Python HTTP request failed")
     headers = load_runtime_settings().get("providers", "eastmoney", "headers")
-    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
-    completed = subprocess.run(
-        [
-            curl,
-            "--http1.1",
-            "-sS",
-            *curl_headers,
-            url,
-        ],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise OSError((completed.stderr or "curl returned no data").strip())
-    return completed.stdout
+    return fetch_text_with_curl(url, headers)
 
 
 def _eastmoney_source(url: str) -> str:
@@ -433,8 +423,21 @@ def _sum_optional(left: float | None, right: float | None) -> float | None:
     return (left or 0.0) + (right or 0.0)
 
 
-def _data_status(now: datetime) -> str:
-    if now.isoweekday() > 5:
+def _quote_observed_at(data: dict[str, object], fallback: datetime) -> datetime:
+    timestamp = _num(data.get("f86"))
+    if timestamp is None or timestamp <= 0:
+        return fallback
+    try:
+        observed = datetime.fromtimestamp(timestamp, tz=ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
+    except (OSError, OverflowError, ValueError):
+        return fallback
+    if observed.date() > fallback.date():
+        return fallback
+    return observed
+
+
+def _data_status(now: datetime, observed_at: datetime) -> str:
+    if now.isoweekday() > 5 or observed_at.date() != now.date():
         return "latest_available"
     hhmm = now.hour * 100 + now.minute
     if 930 <= hhmm <= 1130 or 1300 <= hhmm <= 1500:

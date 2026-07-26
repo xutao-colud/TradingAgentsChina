@@ -2,16 +2,71 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 from app.data.provider_health import ProviderCircuitBreaker
 from app.data.providers.production_provider import ProductionMarketDataProvider, _fundamental_cache_complete, _usable_flow
 from app.data.verified_cache import VerifiedDatasetCache
-from app.schemas.report import DailyPrice, FundamentalSnapshot, MoneyFlowSnapshot
+from app.schemas.report import DataQualityReport, DailyPrice, FundamentalSnapshot, MarketContext, MoneyFlowSnapshot
+
+
+class _UnavailableMarketProvider:
+    def __init__(self, *, configured: bool = False, reports: list[DataQualityReport] | None = None) -> None:
+        self.configured = configured
+        self._reports = list(reports or [])
+
+    def get_market_context(self, analysis_date: str) -> MarketContext:
+        return MarketContext(
+            "上证指数", None, None, None, None, None, None, "数据不足", [],
+            data_status="unavailable", as_of=None,
+        )
+
+    def get_data_quality_reports(self, symbol: str, analysis_date: str) -> list[DataQualityReport]:
+        return list(self._reports)
 
 
 class ProviderHighAvailabilityTest(unittest.TestCase):
+    def test_current_day_replays_recent_verified_market_context_without_claiming_realtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = VerifiedDatasetCache(directory)
+            cached_context = MarketContext(
+                "上证指数", 0.6, 980_000_000_000, 3200, 1800, 65, 8, "修复", [],
+                failed_breakout_rate=18.0,
+                sealed_limit_up_rate=82.0,
+                data_status="verified",
+                as_of="2026-07-17",
+            )
+            cache.save(
+                "market_context", "2026-07-17", cached_context,
+                source_type="sina_market_center+tencent_index", as_of="2026-07-17",
+            )
+            breadth_failure = DataQualityReport(
+                "akshare", "market_breadth_current", "failed", 0, 0, 0.0,
+                as_of="2026-07-20", blocking=True,
+            )
+            provider = ProductionMarketDataProvider(
+                tushare=_UnavailableMarketProvider(configured=False),
+                akshare=_UnavailableMarketProvider(reports=[breadth_failure]),
+                public_fallback=_UnavailableMarketProvider(),
+                verified_cache=cache,
+                today=lambda: date(2026, 7, 20),
+            )
+
+            context = provider.get_market_context("2026-07-20")
+            reports = provider.get_data_quality_reports("000725.SZ", "2026-07-20")
+            source = next(
+                item for item in provider._evidence[("__market__", "2026-07-20")]
+                if item.id == "market-001"
+            )
+
+            self.assertEqual(context.data_status, "latest_available")
+            self.assertEqual(context.as_of, "2026-07-17")
+            self.assertIn("2026-07-17", context.unavailable_reasons[0])
+            self.assertEqual(source.as_of, "2026-07-17")
+            self.assertIn("previous_session", source.source_type)
+            self.assertFalse(next(item for item in reports if item.dataset == "market_breadth_current").blocking)
+
     def test_verified_cache_round_trips_a_list(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = VerifiedDatasetCache(directory)

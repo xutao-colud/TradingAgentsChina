@@ -118,6 +118,36 @@ class LocalMemoryStoreTest(unittest.TestCase):
             self.assertEqual(target.load_portfolio()["cash_balance"], 10000.0)
             self.assertEqual(target.load_portfolio()["positions"][0]["quantity"], 100.0)
 
+    def test_watchlist_is_idempotent_and_repairs_legacy_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "watchlist.json"
+            path.write_text(
+                json.dumps([
+                    {"symbol": "000725", "note": ""},
+                    {"symbol": "000725.SZ", "note": "latest note"},
+                    {"symbol": "00国际复材.SH", "note": "invalid legacy row"},
+                ]),
+                encoding="utf-8",
+            )
+            store = LocalMemoryStore(tmpdir)
+
+            self.assertEqual(store.load_watchlist(), [{"symbol": "000725.SZ", "note": "latest note"}])
+            self.assertEqual(len(store.add_watchlist("000725", "updated note")), 1)
+            self.assertEqual(store.load_watchlist()[0]["note"], "updated note")
+            self.assertEqual(len(json.loads(path.read_text(encoding="utf-8"))), 1)
+
+    def test_watchlist_removal_is_persistent_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LocalMemoryStore(tmpdir)
+            store.add_watchlist("600519", "长期观察")
+            store.add_watchlist("000725", "面板方向")
+
+            remaining = store.remove_watchlist("600519")
+
+            self.assertEqual(remaining, [{"symbol": "000725.SZ", "note": "面板方向"}])
+            self.assertEqual(LocalMemoryStore(tmpdir).load_watchlist(), remaining)
+            self.assertEqual(store.remove_watchlist("600519.SH"), remaining)
+
     def test_outcome_feedback_adapts_to_consent_gated_strategy_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalMemoryStore(tmpdir)

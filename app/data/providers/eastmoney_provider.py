@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from datetime import date
 from typing import Callable
 from urllib.error import URLError
@@ -11,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from app.data.providers.base import MarketDataProvider
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.network.retry import retry_call
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient, StockRealtimeSnapshot
 from app.rules.trading_rules import normalize_symbol
@@ -276,27 +275,8 @@ def _fetch_text(url: str) -> str:
 
 
 def _fetch_text_with_curl(url: str) -> str:
-    curl = shutil.which("curl")
-    if not curl:
-        raise OSError("curl is unavailable and Python HTTP request failed")
     headers = load_runtime_settings().get("providers", "eastmoney", "headers")
-    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
-    completed = subprocess.run(
-        [
-            curl,
-            "--http1.1",
-            "-sS",
-            *curl_headers,
-            url,
-        ],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise OSError((completed.stderr or "curl returned no data").strip())
-    return completed.stdout
+    return fetch_text_with_curl(url, headers)
 
 
 def _load_json(raw: str) -> dict[str, object]:

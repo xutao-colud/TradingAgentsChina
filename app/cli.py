@@ -13,12 +13,13 @@ from app.market.morning_radar import MorningMoneyRadarClient
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 from app.opportunities.pipeline import OpportunityPipeline
 from app.playbooks.catalog import list_playbooks
+from app.reporting.presentation import present_value, public_report_payload
 from app.reporting.render import render_markdown
 from app.schemas.report import today_iso
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the A-share research-agent MVP.")
+    parser = argparse.ArgumentParser(description="Run the A-share TradingOS research workflow.")
     parser.add_argument("symbol", nargs="?", help="A-share symbol, for example 600519 or 600519.SH")
     parser.add_argument("--date", default=today_iso(), help="Analysis date in YYYY-MM-DD format")
     parser.add_argument("--provider", choices=["production", "sample"], default="production", help="Data provider; production never falls back to sample data")
@@ -73,7 +74,7 @@ def main() -> None:
             print(json.dumps({"active_playbook": profile.active_playbook, "trading_profile": profile.to_dict()}, ensure_ascii=False, indent=2))
             return
     if args.replay_analysis:
-        print(json.dumps(store.replay_analysis(args.replay_analysis), ensure_ascii=False, indent=2))
+        print(json.dumps(present_value(store.replay_analysis(args.replay_analysis)), ensure_ascii=False, indent=2))
         return
     if args.replay_opportunity:
         print(json.dumps(store.replay_opportunity_run(args.replay_opportunity), ensure_ascii=False, indent=2))
@@ -141,7 +142,7 @@ def main() -> None:
             analysis_event_id=event.id,
         )
     if args.json:
-        payload = report.to_dict()
+        payload = public_report_payload(report)
         if memory_event_id:
             payload["memory_event_id"] = memory_event_id
         print(json.dumps(payload, ensure_ascii=False, indent=2))

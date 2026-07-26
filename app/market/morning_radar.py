@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from typing import Callable
@@ -12,8 +10,9 @@ from urllib.request import Request, urlopen
 
 from app.rules.trading_rules import normalize_symbol
 from app.config.runtime import load_runtime_settings
+from app.network.curl_transport import fetch_text_with_curl
 from app.network.retry import retry_call
-from app.market.realtime import RealtimeQuote
+from app.market.realtime import RealtimeQuote, is_continuous_trading_session, quote_is_usable
 
 
 FetchText = Callable[[str], str]
@@ -156,10 +155,11 @@ class MorningMoneyRadarClient:
         if not tracked:
             return None
         quotes = self._quote_fetcher(tracked)
+        now = self._now()
         available = [
             quote
             for quote in quotes.values()
-            if quote.data_status != "unavailable" and quote.price is not None and quote.change_pct is not None
+            if _usable_tracked_quote(quote, now)
         ]
         if not available:
             return None
@@ -181,10 +181,10 @@ class MorningMoneyRadarClient:
                 reverse=True,
             )[:limit]
         ]
-        now = self._now()
+        quote_sources = list(dict.fromkeys(quote.source for quote in available))
         return MorningRadarSnapshot(
             as_of=_latest_quote_as_of(available, now),
-            source="sina_tracked_universe",
+            source=f"tracked_universe:{'+'.join(quote_sources)}",
             data_status="tracked_universe",
             market_phase=_market_phase(now),
             top_inflow_sectors=[],
@@ -324,27 +324,8 @@ def _fetch_text(url: str) -> str:
 
 
 def _fetch_text_with_curl(url: str) -> str:
-    curl = shutil.which("curl")
-    if not curl:
-        raise OSError("curl is unavailable and Python HTTP request failed")
     headers = load_runtime_settings().get("providers", "eastmoney", "headers")
-    curl_headers = [argument for name, value in headers.items() for argument in ("-H", f"{name}: {value}")]
-    completed = subprocess.run(
-        [
-            curl,
-            "--http1.1",
-            "-sS",
-            *curl_headers,
-            url,
-        ],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=load_runtime_settings().get("runtime", "network_timeout_seconds"),
-    )
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise OSError((completed.stderr or "curl returned no data").strip())
-    return completed.stdout
+    return fetch_text_with_curl(url, headers)
 
 
 def _eastmoney_source(url: str) -> str:
@@ -433,6 +414,19 @@ def _latest_quote_as_of(quotes: list[RealtimeQuote], fallback: datetime) -> str:
         except ValueError:
             continue
     return (max(timestamps) if timestamps else fallback).isoformat(timespec="seconds")
+
+
+def _usable_tracked_quote(quote: RealtimeQuote, now: datetime) -> bool:
+    """Allow a recent close only outside continuous trading hours."""
+    has_required_fields = (
+        quote.change_pct is not None
+        and quote_is_usable(
+            quote,
+            now,
+            allow_previous_session=not is_continuous_trading_session(now),
+        )
+    )
+    return has_required_fields
 
 
 def _market_phase(now: datetime) -> str:

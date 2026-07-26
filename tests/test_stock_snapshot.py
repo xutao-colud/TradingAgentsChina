@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.market.stock_snapshot import EastmoneyStockSnapshotClient
 
@@ -24,6 +25,29 @@ class StockSnapshotTest(unittest.TestCase):
         self.assertEqual(quotes["000725.SZ"].name, "京东方A")
         self.assertEqual(len(requested_urls), 1)
         self.assertNotIn("fflow", requested_urls[0])
+
+    def test_weekend_quote_uses_provider_timestamp_instead_of_refresh_date(self) -> None:
+        provider_time = datetime(2026, 7, 24, 15, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        quote_payload = {
+            "data": {
+                "f43": 581,
+                "f57": "000725",
+                "f58": "BOE",
+                "f60": 606,
+                "f86": int(provider_time.timestamp()),
+                "f170": -413,
+            }
+        }
+        client = EastmoneyStockSnapshotClient(
+            fetch_text=lambda url: json.dumps(quote_payload),
+            now=lambda: datetime(2026, 7, 25, 10, 0, 0),
+        )
+
+        quote = client.fetch_quote("000725")
+
+        self.assertEqual(quote.trade_date, "2026-07-24")
+        self.assertEqual(quote.trade_time, "15:00:00")
+        self.assertEqual(quote.data_status, "latest_available")
 
     def test_fetch_snapshots_deduplicates_symbols_and_keeps_result_mapping(self) -> None:
         class RecordingClient(EastmoneyStockSnapshotClient):

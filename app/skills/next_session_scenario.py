@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import statistics
 from dataclasses import dataclass
 
@@ -18,11 +19,19 @@ class _HistoricalOutcome:
 
 
 def analyze_next_session_scenario(
-    prices: list[DailyPrice], data_readiness: SkillInsight | None = None
+    prices: list[DailyPrice],
+    data_readiness: SkillInsight | None = None,
+    realtime_quote: dict[str, object] | None = None,
 ) -> SkillInsight:
     """Describe next-session historical frequencies without treating them as a forecast."""
     config = load_runtime_settings().get("domain_knowledge", "next_session_scenario")
     ordered = _valid_ordered_prices(prices)
+    ordered, excluded_incomplete_bar_date = _exclude_incomplete_latest_bar(
+        ordered,
+        realtime_quote,
+        str(config["session_close_time"]),
+        {str(status) for status in config["incomplete_quote_statuses"]},
+    )
     source_rejection = _price_source_rejection(data_readiness)
     if source_rejection:
         return _insufficient(ordered, source_rejection)
@@ -53,21 +62,22 @@ def analyze_next_session_scenario(
     if current_signature is None:
         return _insufficient(ordered, "当前价格历史不足以计算趋势、动量和波动状态。")
     similar = [item for item in outcomes if item.signature == current_signature]
-    if len(similar) >= int(config["minimum_similar_samples"]):
-        selected = similar
-        sample_mode = "similar"
-        stage = "相似状态样本"
-    elif len(outcomes) >= int(config["minimum_baseline_samples"]):
-        selected = outcomes
-        sample_mode = "baseline"
-        stage = "全样本基准（相似样本不足）"
-    else:
+    minimum_similar_samples = int(config["minimum_similar_samples"])
+    if len(similar) < minimum_similar_samples:
         return _insufficient(
             ordered,
-            f"可用次日结果样本仅 {len(outcomes)} 个，低于配置门槛 {config['minimum_baseline_samples']} 个。",
+            (
+                f"当前状态的历史可比样本仅 {len(similar)} 个，低于配置门槛 {minimum_similar_samples} 个；"
+                "全样本涨跌分布与当前状态不等价，本次不显示红盘率或绿盘率。"
+            ),
             similar_count=len(similar),
+            eligible_outcome_count=len(outcomes),
             current_signature=current_signature,
+            excluded_incomplete_bar_date=excluded_incomplete_bar_date,
         )
+    selected = similar
+    sample_mode = "similar"
+    stage = "相似状态样本"
 
     flat_band = float(config["flat_band_pct"])
     red = [item for item in selected if item.return_pct > flat_band]
@@ -110,8 +120,10 @@ def analyze_next_session_scenario(
             "available": True,
             "observational_only": True,
             "no_forward_lookahead": True,
+            "rate_basis": "exact_state_match",
             "sample_mode": sample_mode,
             "sample_size": total,
+            "eligible_outcome_count": len(outcomes),
             "similar_sample_size": len(similar),
             "sample_start": selected[0].signal_date,
             "sample_end": selected[-1].outcome_date,
@@ -133,6 +145,7 @@ def analyze_next_session_scenario(
             },
             "source_ids": ["price-001"],
             "as_of": ordered[-1].trade_date,
+            "excluded_incomplete_bar_date": excluded_incomplete_bar_date,
             "invalidation_conditions": [
                 "分析日后出现未纳入样本的重大公告、停复牌或交易制度变化",
                 "当前状态签名在下一交易日前发生明显变化",
@@ -176,6 +189,26 @@ def _valid_ordered_prices(prices: list[DailyPrice]) -> list[DailyPrice]:
     return [by_date[key] for key in sorted(by_date)]
 
 
+def _exclude_incomplete_latest_bar(
+    prices: list[DailyPrice],
+    realtime_quote: dict[str, object] | None,
+    session_close_time: str,
+    incomplete_quote_statuses: set[str],
+) -> tuple[list[DailyPrice], str | None]:
+    if not prices or not realtime_quote:
+        return prices, None
+    latest_date = prices[-1].trade_date
+    quote_date = str(realtime_quote.get("trade_date") or "")
+    quote_status = str(realtime_quote.get("data_status") or "")
+    if quote_date != latest_date or quote_status not in incomplete_quote_statuses:
+        return prices, None
+    quote_time_match = re.search(r"(\d{2}:\d{2}:\d{2})", str(realtime_quote.get("trade_time") or ""))
+    quote_time = quote_time_match.group(1) if quote_time_match else None
+    if quote_time is not None and quote_time >= session_close_time:
+        return prices, None
+    return prices[:-1], latest_date
+
+
 def _wilson_interval(successes: int, total: int, z_score: float) -> tuple[float, float]:
     if total <= 0:
         return 0.0, 0.0
@@ -205,7 +238,9 @@ def _insufficient(
     prices: list[DailyPrice],
     reason: str,
     similar_count: int = 0,
+    eligible_outcome_count: int = 0,
     current_signature: tuple[str, str, str] | None = None,
+    excluded_incomplete_bar_date: str | None = None,
 ) -> SkillInsight:
     config = load_runtime_settings().get("domain_knowledge", "next_session_scenario")
     return SkillInsight(
@@ -215,18 +250,26 @@ def _insufficient(
         score=int(config["neutral_score"]),
         conclusion=reason,
         strategy="继续积累经质量校验的连续复权日线；样本不足时不显示红盘率或绿盘率。",
-        evidence=[f"当前有效日线：{len(prices)} 条", f"相似状态样本：{similar_count} 个"],
+        evidence=[
+            f"当前已完成有效日线：{len(prices)} 条",
+            f"相似状态样本：{similar_count} 个",
+            f"可形成次日结果的历史样本：{eligible_outcome_count} 个",
+        ],
         risks=["缺少足够样本时输出百分比会制造虚假精度，因此本次拒绝估计。"],
         details={
             "mode": "next_session_scenario",
             "admitted": False,
             "observational_only": True,
+            "no_forward_lookahead": True,
+            "rate_basis": "exact_state_match",
             "available": False,
             "sample_size": 0,
             "similar_sample_size": similar_count,
+            "eligible_outcome_count": eligible_outcome_count,
             "signature": current_signature,
             "source_ids": ["price-001"] if prices else [],
             "as_of": prices[-1].trade_date if prices else None,
+            "excluded_incomplete_bar_date": excluded_incomplete_bar_date,
         },
     )
 

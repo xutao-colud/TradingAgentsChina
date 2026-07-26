@@ -14,6 +14,7 @@ from app.llm.prompt_contracts import (
 )
 from app.config.runtime import load_runtime_settings
 from app.network.retry import is_outbound_access_denied
+from app.reporting.citations import sanitize_model_interpretation
 from app.schemas.report import AnalysisReport
 
 
@@ -59,7 +60,11 @@ class OpenAICompatibleClient:
             )
         except RuntimeError as exc:
             raise RuntimeError(f"{self.provider_name} model {self.model} request failed: {exc}") from exc
-        return replace(report, model_interpretation=content, model_execution=metadata)
+        return replace(
+            report,
+            model_interpretation=sanitize_model_interpretation(content, report.evidence_sources),
+            model_execution=metadata,
+        )
 
 
 class DeepSeekClient:
@@ -109,7 +114,11 @@ class DeepSeekClient:
             )
         except RuntimeError as exc:
             raise RuntimeError(f"DeepSeek model {self.config.model} request failed: {exc}") from exc
-        return replace(report, model_interpretation=content, model_execution=metadata)
+        return replace(
+            report,
+            model_interpretation=sanitize_model_interpretation(content, report.evidence_sources),
+            model_execution=metadata,
+        )
 
 
 def _request_complete_explanation(

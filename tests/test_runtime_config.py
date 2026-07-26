@@ -27,12 +27,54 @@ class RuntimeConfigTest(unittest.TestCase):
     def test_default_configuration_has_a_versioned_source(self) -> None:
         settings = load_runtime_settings()
 
-        self.assertEqual(settings.rule_version, "2026-07-17.2")
+        self.assertEqual(settings.rule_version, "2026-07-24.1")
         self.assertEqual(settings.source, str(DEFAULT_CONFIG_PATH.resolve()))
         self.assertEqual(settings.get("runtime", "local_server", "host"), "0.0.0.0")
         self.assertEqual(settings.get("runtime", "local_server", "port"), 8000)
         self.assertEqual(settings.get("runtime", "snapshot_max_workers"), 4)
+        self.assertEqual(settings.get("runtime", "small_team_test", "maximum_active_users"), 10)
+        self.assertEqual(
+            settings.get("runtime", "small_team_test", "maximum_concurrent_research_jobs"),
+            2,
+        )
+        self.assertTrue(settings.get("runtime", "small_team_test", "require_production_provider"))
+        self.assertFalse(
+            settings.get("runtime", "small_team_test", "allow_browser_model_configuration")
+        )
+        self.assertGreaterEqual(len(settings.get("runtime", "login_visual", "back_messages")), 8)
+        self.assertGreaterEqual(len(settings.get("runtime", "login_visual", "back_message_palette")), 4)
         self.assertEqual(settings.get("domain_knowledge", "technical", "history_bars"), 120)
+        self.assertTrue(settings.get(
+            "providers", "high_availability", "source_lag", "previous_session_market_replay_enabled"
+        ))
+        self.assertEqual(settings.get("reporting", "evidence_brief", "version"), "evidence-brief-v1")
+        self.assertEqual(settings.get("reporting", "presentation", "judge_title"), "主审判官")
+
+    def test_report_presentation_requires_complete_unique_roles(self) -> None:
+        config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        config["reporting"]["presentation"]["finding_roles"].pop("资金流 Agent")
+
+        with tempfile.TemporaryDirectory() as directory:
+            override_path = Path(directory) / "invalid-report-presentation.json"
+            override_path.write_text(json.dumps(config), encoding="utf-8")
+            os.environ["TRADINGOS_CONFIG_PATH"] = str(override_path)
+            clear_runtime_settings_cache()
+
+            with self.assertRaisesRegex(RuntimeError, "reporting.presentation"):
+                load_runtime_settings()
+
+    def test_evidence_brief_limits_must_be_positive(self) -> None:
+        config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        config["reporting"]["evidence_brief"]["maximum_critical_data_gaps"] = 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            override_path = Path(directory) / "invalid-evidence-brief.json"
+            override_path.write_text(json.dumps(config), encoding="utf-8")
+            os.environ["TRADINGOS_CONFIG_PATH"] = str(override_path)
+            clear_runtime_settings_cache()
+
+            with self.assertRaisesRegex(RuntimeError, "evidence_brief"):
+                load_runtime_settings()
 
     def test_technical_history_must_cover_every_configured_window(self) -> None:
         config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -85,6 +127,32 @@ class RuntimeConfigTest(unittest.TestCase):
             clear_runtime_settings_cache()
 
             with self.assertRaisesRegex(RuntimeError, "continuation limits"):
+                load_runtime_settings()
+
+    def test_small_team_capacity_must_match_the_supported_test_size(self) -> None:
+        config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        config["runtime"]["small_team_test"]["maximum_active_users"] = 11
+
+        with tempfile.TemporaryDirectory() as directory:
+            override_path = Path(directory) / "invalid-small-team-capacity.json"
+            override_path.write_text(json.dumps(config), encoding="utf-8")
+            os.environ["TRADINGOS_CONFIG_PATH"] = str(override_path)
+            clear_runtime_settings_cache()
+
+            with self.assertRaisesRegex(RuntimeError, "small_team_test"):
+                load_runtime_settings()
+
+    def test_login_visual_rejects_promissory_market_copy(self) -> None:
+        config = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        config["runtime"]["login_visual"]["back_messages"][0] = "一定涨停"
+
+        with tempfile.TemporaryDirectory() as directory:
+            override_path = Path(directory) / "invalid-login-visual.json"
+            override_path.write_text(json.dumps(config), encoding="utf-8")
+            os.environ["TRADINGOS_CONFIG_PATH"] = str(override_path)
+            clear_runtime_settings_cache()
+
+            with self.assertRaisesRegex(RuntimeError, "runtime.login_visual"):
                 load_runtime_settings()
 
     def test_board_ladder_configuration_must_cover_every_consecutive_board(self) -> None:

@@ -22,6 +22,7 @@ from app.playbooks.evaluator import assess_active_playbook
 from app.rules.trading_rules import invalid_conditions, normalize_symbol
 from app.rules.risk_facts import enrich_stock_profile_risks
 from app.rules.special_instruments import assess_listing_stage
+from app.reporting.evidence_brief import build_decision_brief
 from app.schemas.report import AnalysisReport, DataQualityReport, EvidenceSource
 from dataclasses import replace
 
@@ -100,10 +101,14 @@ class AShareResearchWorkflow:
 
     def _collect_data(self, state: ResearchState) -> None:
         state.profile = self.provider.get_stock_profile(state.symbol)
+        price_history_bars = max(
+            required_history_bars(),
+            int(load_runtime_settings().get("domain_knowledge", "next_session_scenario", "history_bars")),
+        )
         state.prices = self.provider.get_daily_prices(
             state.symbol,
             state.analysis_date,
-            lookback_days=required_history_bars(),
+            lookback_days=price_history_bars,
         )
         state.fundamentals = self.provider.get_fundamentals(state.symbol, state.analysis_date)
         state.industry_context = self.provider.get_industry_context(state.symbol, state.analysis_date)
@@ -179,7 +184,7 @@ class AShareResearchWorkflow:
             analyze_tiered_money_flow(state.money_flow),
             analyze_capital_flow_continuity(state.prices, state.capital_flow_history),
             analyze_turnover_continuity(state.prices),
-            analyze_next_session_scenario(state.prices, state.data_readiness),
+            analyze_next_session_scenario(state.prices, state.data_readiness, state.realtime_quote),
             analyze_price_observation_zones(state.prices, state.fundamentals, state.data_readiness),
             analyze_ah_premium(state.ah_premium, state.data_quality_reports) if state.ah_premium else None,
             analyze_intraday_snapshot(state.intraday) if state.intraday else None,
@@ -234,7 +239,7 @@ class AShareResearchWorkflow:
         risk_level, risk_factors = assess_risk(state.findings, state.invalid_conditions, state.skill_insights)
         finding_by_agent = {item.agent: item for item in state.findings}
         settings = load_runtime_settings()
-        return AnalysisReport(
+        report = AnalysisReport(
             symbol=state.profile.symbol,
             name=state.profile.name,
             analysis_date=state.analysis_date,
@@ -264,6 +269,7 @@ class AShareResearchWorkflow:
             config_source=settings.source,
             analysis_level=analysis_level,
         )
+        return replace(report, decision_brief=build_decision_brief(report))
 
 
 def _finding_confidence_cap(
